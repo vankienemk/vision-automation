@@ -632,11 +632,15 @@ UI hiển thị **FPS camera / FPS suy luận / ms suy luận** để bạn cân
 **Nút ⏻ Tắt ứng dụng** (cạnh logo, có ở mọi tab) mở hộp thoại xác nhận rồi gọi
 `POST /api/system/shutdown`. Ứng dụng dừng **đúng quy trình an toàn** như Ctrl-C:
 
-1. Gửi trạng thái `offline` cho MQTT (và lệnh tắt đèn theo timeline của kịch bản nếu có);
+1. Gửi trạng thái `offline` cho MQTT (báo hệ thống đã dừng, LWT/availability);
 2. Đóng mọi luồng camera (nhả webcam, tắt đèn LED);
 3. Lưu `config.yaml` + `config.yaml.bak`;
 4. Tab đang mở hiện màn hình *"Ứng dụng đã dừng"* kèm cách bật lại
    (`Khoi-dong.bat` trên Windows / `python run.py`). Trình duyệt không treo.
+
+> **Đèn/thiết bị đang bật sẽ giữ nguyên trạng thái khi app tắt** — app *không* tự
+> gửi lệnh OFF lúc thoát, vì thoát app không có nghĩa là phòng đã trống (đúng
+> nguyên tắc fail-safe `on_camera_lost: hold`).
 
 Khi app đã dừng, trang web tự ngừng gọi máy chủ (không xoay vòng lỗi mạng).
 

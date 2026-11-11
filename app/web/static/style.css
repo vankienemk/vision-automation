@@ -406,7 +406,7 @@ button.btn.attention {
 
 /* ---------- bảng chẩn đoán ---------- */
 #diag-card summary { cursor: pointer; }
-.diag-summary { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 8px 0; font-size: 12.5px; }
+.diag-summary { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; font-size: 12.5px; }
 .diag-line b { color: #e2e8f0; }
 .diag-warnings { display: none; }
 .diag-warnings.show { display: block; margin-bottom: 8px; }

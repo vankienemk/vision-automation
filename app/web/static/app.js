@@ -3491,10 +3491,12 @@ function askShutdown() {
       '<h2>⏻ Tắt ứng dụng?</h2>' +
       '<p>Ứng dụng sẽ dừng <b>an toàn</b>:</p>' +
       '<ul class="small" style="margin:8px 0 8px 18px;line-height:1.7">' +
-        '<li>gửi trạng thái <b>offline</b> cho MQTT và lệnh tắt đèn theo kịch bản,</li>' +
+        '<li>gửi trạng thái <b>offline</b> cho MQTT (báo hệ thống đã dừng),</li>' +
         '<li>đóng mọi luồng camera (đèn webcam tắt),</li>' +
         '<li>lưu <code>config.yaml</code> (kèm <code>.bak</code>).</li>' +
       '</ul>' +
+      '<p class="small muted">Đèn/thiết bị đang bật sẽ <b>giữ nguyên trạng thái</b> khi app tắt ' +
+        '(an toàn, không tự tắt oan) — muốn tắt thì tắt trên app điều khiển như bình thường.</p>' +
       '<p class="small muted">Muốn chạy lại: bấm <b>Khoi-dong.bat</b> (Windows) hoặc chạy ' +
         '<code>python run.py</code> trên máy này. Trình duyệt/phần mềm khác không bị ảnh hưởng.</p>' +
       '<div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px">' +
