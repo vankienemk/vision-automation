@@ -149,7 +149,11 @@ def prepare_config(path: Path) -> None:
 
 def build_runtime(args: argparse.Namespace) -> Runtime:
     configure_stdio()
-    path = Path(args.config).expanduser()
+    # TUYỆT ĐỐI phải resolve thành đường dẫn TUYỆT ĐỐI trước khi chdir: nếu
+    # không, ``--config data/config.yaml`` (đường dẫn tương đối) sau khi chdir
+    # vào ``data/`` sẽ trỏ tới ``data/data/config.yaml`` ⇒ app "tự tạo cấu hình
+    # mới" và người dùng tưởng mất hết cài đặt.
+    path = Path(args.config).expanduser().resolve()
     prepare_workdir(path)
     prepare_config(path)
     try:

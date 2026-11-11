@@ -333,3 +333,43 @@ def test_configure_stdio_is_safe() -> None:
 
     configure_stdio()  # must never raise, whatever stdout is
     configure_stdio()
+
+
+def test_relative_config_path_in_a_subdirectory_is_resolved_before_chdir(tmp_path, monkeypatch) -> None:
+    """``--config data/config.yaml`` không được biến thành ``data/data/config.yaml``.
+
+    Lỗi thật: chdir sang thư mục của config xảy ra TRƯỚC khi mở file, nên đường
+    dẫn tương đối bị tính hai lần; app "tự tạo cấu hình mới" và người dùng tưởng
+    mất toàn bộ cài đặt.
+    """
+    import argparse
+    import os
+    from pathlib import Path
+
+    from app import main as main_module
+
+    project = tmp_path / "project"
+    data = project / "data"
+    data.mkdir(parents=True)
+    config_file = data / "config.yaml"
+    config_file.write_text("schema_version: 1\ncameras: []\nscenarios: []\n", encoding="utf-8")
+
+    monkeypatch.chdir(project)
+    args = argparse.Namespace(
+        config="data/config.yaml",
+        log_level=None,
+        dry_run=True,
+        port=None,
+        host=None,
+        with_webcam=False,
+        no_detector=True,
+        no_web=True,
+    )
+    runtime = main_module.build_runtime(args)
+    try:
+        assert Path.cwd() == data.resolve()
+        assert (data / "data").exists() is False, "đã tạo nhầm thư mục lồng nhau"
+        assert runtime.config_manager.path.resolve() == config_file.resolve()
+    finally:
+        runtime.stop()
+        os.chdir(project)
