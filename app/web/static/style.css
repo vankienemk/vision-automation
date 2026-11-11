@@ -442,3 +442,35 @@ button.btn.attention {
 .zone-analysis b { color: #e2e8f0; }
 .zone-item .zwarn { display: block; font-size: 11px; color: #fbbf24; margin-top: 2px; }
 #zone-ratio-field[hidden] { display: none; }
+
+/* Banner "giao diện đang là bản cũ" — hiện khi máy chủ đã có app.js mới mà tab
+   này vẫn chạy bản đã nạp trước đó (nguyên nhân kinh điển của "bấm nút không ăn"). */
+.ui-stale-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0b1120;
+  background: #fbbf24;
+  box-shadow: 0 2px 10px #0008;
+}
+.ui-stale-banner button {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 700;
+  color: #fff;
+  background: #1d4ed8;
+  cursor: pointer;
+}
+.ui-stale-banner button:hover { background: #1e40af; }

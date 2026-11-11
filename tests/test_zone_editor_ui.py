@@ -252,6 +252,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     saved_zones: list = []  # noqa: RUF012 - class-level recorder
     posts: list = []        # noqa: RUF012 - mọi POST (dùng cho test nút bấm)
+    asset_version: str = "111"  # noqa: RUF012 - phiên bản app.js máy chủ đang phục vụ
     server_version = "ZoneUITest/1.0"
 
     def log_message(self, *args) -> None:  # noqa: A002 - giữ im lặng log của server
@@ -282,7 +283,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif path == "/api/config":
             self._json(_config_payload())
         elif path == "/api/state":
-            self._json(_state_payload())
+            payload = _state_payload()
+            payload["asset_version"] = type(self).asset_version
+            self._json(payload)
         elif path in ("/api/state/public", "/api/events"):
             self._json({"events": [], "auth_enabled": False, "setup_completed": True})
         elif path == "/api/detector/classes":
@@ -750,4 +753,30 @@ def test_camera_card_shows_fix_hint_and_connection_check_button(browser, ui_base
         text = page.eval_on_selector("#settings-cameras", "el => el.textContent")
         assert "Kiểm tra" in text
     finally:
+        page.context.close()
+
+def test_stale_tab_gets_a_reload_banner(browser, ui_base_url):
+    """Tab mở từ hôm trước phải được nhắc nạp lại khi máy chủ đã có app.js mới.
+
+    Người dùng thật đã gặp: máy chủ phục vụ app.js mới nhưng tab giữ bản cũ
+    trong bộ nhớ ⇒ nút mới không hề có trong DOM ⇒ "bấm không ăn".
+    """
+    _Handler.asset_version = "111"
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = context.new_page()
+    try:
+        page.goto(ui_base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function("() => window.__VO__ && window.__VO__.state", timeout=10000)
+        page.wait_for_timeout(200)
+        assert page.eval_on_selector_all("#ui-stale-banner", "els => els.length") == 0
+
+        # Máy chủ "vừa được cập nhật"
+        _Handler.asset_version = "222"
+        page.evaluate("() => window.__VO__.setState(Object.assign({}, window.__VO__.state, {asset_version: '222'}))")
+        page.wait_for_selector("#ui-stale-banner", timeout=3000)
+        text = page.inner_text("#ui-stale-banner")
+        assert "bản giao diện mới" in text
+        assert page.eval_on_selector_all("#ui-stale-reload", "els => els.length") == 1
+    finally:
+        _Handler.asset_version = "111"
         page.context.close()

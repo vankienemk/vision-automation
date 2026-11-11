@@ -103,6 +103,8 @@ const S = {
   presetHint: '',
   pointerBusy: false,      // đang giữ chuột/ngón tay → KHÔNG dựng lại DOM
   camChecks: {},           // kết quả "Kiểm tra kết nối" của từng camera
+  assetVersion: null,      // phiên bản app.js/style.css lúc mở trang
+  staleNotified: false,
 };
 
 const ZE = {
@@ -181,7 +183,7 @@ function connectWs() {
   socket.onmessage = (event) => {
     let payload;
     try { payload = JSON.parse(event.data); } catch (e) { return; }
-    if (payload.type === 'state') { S.state = payload.state; renderAll(); }
+    if (payload.type === 'state') { S.state = payload.state; noteAssetVersion(S.state); renderAll(); }
     else if (payload.type === 'event') { onEvent(payload.event); }
   };
   socket.onclose = (event) => {
@@ -194,6 +196,34 @@ function connectWs() {
 function scheduleWsRetry() {
   S.wsRetry = Math.min(15, S.wsRetry + 1);
   setTimeout(connectWs, 500 * S.wsRetry);
+}
+
+// --------------------------------------------------------------------------
+// "Giao diện đang là bản cũ" — cảnh báo khi máy chủ đã có app.js mới nhưng tab
+// này vẫn đang chạy bản cũ đã nạp trước đó.
+//
+// Vì sao cần: mỗi lần cập nhật, người dùng mở sẵn tab từ hôm trước; tab giữ
+// app.js cũ trong bộ nhớ nên mọi nút mới (hoặc nút đã sửa) "bấm không ăn" dù
+// máy chủ đã phục vụ bản mới. Banner này nói thẳng ra và cho bấm nạp lại.
+function noteAssetVersion(state) {
+  const version = state && state.asset_version;
+  if (!version || S.staleNotified) return;
+  if (!S.assetVersion) { S.assetVersion = String(version); return; }
+  if (String(version) === S.assetVersion) return;
+  S.staleNotified = true;
+  showStaleBanner();
+}
+
+function showStaleBanner() {
+  if ($('#ui-stale-banner')) return;
+  const bar = document.createElement('div');
+  bar.id = 'ui-stale-banner';
+  bar.className = 'ui-stale-banner';
+  bar.setAttribute('role', 'alert');
+  bar.innerHTML = '<span>🔄 Máy chủ vừa có bản giao diện mới. Trang này vẫn đang chạy bản cũ nên một số nút có thể không phản hồi.</span>'
+    + '<button type="button" id="ui-stale-reload">Nạp lại ngay</button>';
+  document.body.appendChild(bar);
+  $('#ui-stale-reload').addEventListener('click', () => location.reload());
 }
 
 function onEvent(event) {
@@ -3344,6 +3374,7 @@ async function boot() {
   // initial HTTP state (WS will take over)
   try {
     S.state = await api('/api/state');
+    noteAssetVersion(S.state);
     renderAll();
   } catch (e) {
     if (e.status === 401) { location.href = '/login'; return; }
@@ -3368,7 +3399,7 @@ window.__VO__ = {
   get config() { return S.config; },
   get tab() { return S.tab; },
   renderAll,
-  setState(next) { S.state = next; renderAll(); },
+  setState(next) { S.state = next; noteAssetVersion(next); renderAll(); },
 };
 
 document.addEventListener('DOMContentLoaded', boot);

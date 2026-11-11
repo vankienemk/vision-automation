@@ -197,6 +197,29 @@ async def test_index_html_carries_cache_buster_and_zone_controls(tmp_path, image
 
 
 @pytest.mark.asyncio
+async def test_state_reports_asset_version_matching_the_index(tmp_path, image_path):
+    """Tab đang mở phải biết máy chủ đã có app.js mới (banner "nạp lại").
+
+    Người dùng thật đã mất thời gian vì tab cũ giữ app.js cũ: nút mới không có
+    trong DOM nên "bấm không ăn". Cache-buster chỉ tác dụng khi nạp lại trang,
+    nên /api/state phải mang phiên bản asset để client tự phát hiện.
+    """
+    runtime = build_runtime(tmp_path, image_path)
+    runtime.start()
+    try:
+        async with client_for(runtime) as client:
+            html = (await client.get("/")).text
+            stamp = html.split("/static/app.js?v=", 1)[1].split('"', 1)[0]
+            state = (await client.get("/api/state")).json()
+            assert state["asset_version"] == stamp
+            # ws dùng cùng payload
+            public = (await client.get("/api/state/public")).json()
+            assert "asset_version" not in public  # login page không cần
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_config_roundtrip_and_validation(tmp_path, image_path):
     runtime = build_runtime(tmp_path, image_path)
     runtime.start()

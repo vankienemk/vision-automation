@@ -715,6 +715,7 @@ mosquitto_pub -h 192.168.1.10 -t zigbee2mqtt/den_bep/set -m '{"state":"ON"}'
 | Máy chạy chậm / nóng | Giảm `detect_fps`, `imgsz`; bật `motion_gating`; đặt `device: cpu` nếu MPS gây nóng. |
 | `Kịch bản … đang trỏ tới vùng …` khi bấm **Lưu vùng** | Vùng đang bị kịch bản dùng nhưng đã bị xoá/đổi mã. UI **hỏi trước**: *"Bấm OK để xoá luôn các kịch bản đó"*; nếu đổi mã thì server tự cập nhật kịch bản. Muốn giữ kịch bản: **đổi tên** vùng (mã vẫn khoá 🔒) thay vì xoá, hoặc vào tab **Kịch bản** chọn lại vùng. |
 | Mở UI lại vẫn thấy lỗi cũ / giao diện như trước khi cập nhật | Trình duyệt giữ `app.js` cũ trong cache. Bản này tự gắn `?v=<mtime>` vào link JS/CSS nên chỉ cần **F5**; nếu vẫn cũ thì **Ctrl/Cmd + Shift + R**. |
+| Tab đang mở từ hôm trước: nút mới “không ăn”, giao diện thiếu mục vừa cập nhật | Tab cũ giữ `app.js` **đã nạp trong bộ nhớ** (cache-buster chỉ có tác dụng khi nạp lại trang). Bản này tự phát hiện: `/api/state` mang `asset_version`, khi lệch với bản đang chạy thì hiện **thanh vàng** *“🔄 Máy chủ vừa có bản giao diện mới…”* + nút **Nạp lại ngay**. Không thấy thanh đó mà vẫn nghi bản cũ: **F5** (hoặc Ctrl/Cmd+Shift+R). |
 | UI tự nhảy về camera đầu danh sách | Đã sửa: camera đang chọn được nhớ trong trình duyệt (`localStorage`), và tab **Trực tiếp** ↔ tab **Vùng phát hiện** luôn nói về cùng một camera. Xoá dữ liệu trang web (site data) sẽ quên lựa chọn này. |
 | Không kéo được điểm / không thêm được điểm trên cạnh vùng | Đưa chuột tới **điểm** — điểm đó sáng vàng, con trỏ thành ✋; tới **giữa cạnh** — con trỏ thành **+** (đa giác) hoặc ↕/↔ (hình chữ nhật). Nếu không thấy gì đổi: đang ở chế độ **vẽ vùng mới** (có thanh vàng) → nhấn **Esc**, hoặc bấm trúng một điểm của vùng có sẵn để tự huỷ bản nháp. |
 | Kéo một điểm mà cả vùng chạy theo / hình chữ nhật bị méo | Đã sửa: **đa giác** chỉ dời đúng điểm đang kéo; **hình chữ nhật** kéo góc = đổi chiều dài/rộng (có kẹp, không lật), kéo chấm giữa cạnh = dời riêng cạnh đó. Kiểm tra ô **Kiểu vùng** đúng với ý bạn (kiểu được lưu vào config). |
@@ -800,7 +801,7 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**270 test**) phủ:
+Bộ test (**272 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
 - **`tests/test_zones.py`** — hình học đa giác, **5 chế độ xác định trong vùng**
@@ -852,7 +853,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 270 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
+├── tests/                  # 272 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
@@ -903,6 +904,7 @@ OpenCV/MQTT**, nên test được với **đồng hồ giả** và chạy nhanh.
 | Chẩn đoán mạng độc lập (máy này) | ping `192.168.200.141` **có trả lời** (97–116 ms, ARP có MAC), nhưng **0/33 cổng mở** (554, 8554, 1935, 8080, 445, 3389, …) → kết luận: dịch vụ RTSP không listen ra mạng, **không phải lỗi app**; đối chứng `test.mosquitto.org:1883` và LAN `192.168.200.159:8080` đều kết nối được |
 | Hộp quyền camera | trước: luôn in “macOS chưa cho phép…” dù đã cấp quyền; nay **“✅ Đã cấp quyền camera cho ứng dụng này.”** (nền xanh), chỉ hiện hướng dẫn cấp quyền khi thật sự bị chặn |
 | Thẻ camera trong Cài đặt | hiện thêm dòng 💡 **gợi ý sửa** (`capture.hint`) và nút **🔌 Kiểm tra** với kết quả chi tiết ngay dưới tên camera |
+| Tab cũ giữ `app.js` cũ (bẫy “bấm không ăn” lần 2) | `GET /api/state` trả `asset_version` = mtime của `app.js`/`style.css`. Đo trên app thật cổng 8080: mở trang → **0** banner; đổi mtime (giả lập phát hành bản mới) → **2.5 s sau banner hiện** *“🔄 Máy chủ vừa có bản giao diện mới…”* + nút **Nạp lại ngay** |
 
 ## 19. Những gì đã chạy thật trên máy Apple Silicon (M1)
 
@@ -910,7 +912,7 @@ Bảng dưới là kết quả đo được khi phát triển, không phải suy
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest` | **270/270 pass** (~33 s) |
+| `pytest` | **272/272 pass** (~37 s) |
 | RTSP thật `rtsp://192.168.1.50:554/live.sdp` (640×480, nguồn 10 fps) | chạy **> 6 phút liên tục**: `capture_fps 10.0`, `read_ms 110`, **`frame_age_ms 30`** (trước khi sửa: trễ ~3 s, hễ ~20 s lại `Luồng treo quá 10s`), **0** lần treo trong log, `FPS suy luận 4.0` |
 | Sự cố “treo liên tục + trễ 3 s” | hai lỗi gốc: (1) `_on_config_change` ném `IndexError` tại `running = {name.split("-", 1)[1] …}` nên **không bao giờ tạo luồng suy luận** cho camera thêm từ UI; (2) đọc RTSP bị **giới hạn tốc độ theo `fps`** nên khung dư dồn mãi → trễ dần rồi đứng. Đã sửa + thêm 6 test hồi quy |
 | Hot-reload bật/tắt camera đang chạy | `{"value": false}` → `Dừng luồng suy luận live_sdp`; `{"value": true}` → `Luồng suy luận live_sdp bắt đầu`; **không** còn `IndexError` |

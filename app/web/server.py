@@ -45,6 +45,22 @@ MJPEG_BOUNDARY = "visionframe"
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
+def _asset_stamp() -> str:
+    """Version of the UI bundle, used both as cache-buster and freshness probe.
+
+    The browser keeps the *already loaded* app.js in memory until the page is
+    reloaded, so a cache-buster alone cannot help an open tab. ``/api/state``
+    reports this stamp; the UI compares it with the stamp it was opened with and
+    offers a reload button when they differ (otherwise the user keeps clicking
+    on controls that no longer exist in the new build).
+    """
+    try:
+        newest = max((STATIC_DIR / name).stat().st_mtime for name in ("app.js", "style.css"))
+    except OSError:
+        return "0"
+    return str(int(newest))
+
+
 def _make_cookie(secret: str, username: str, hours: int) -> str:
     expiry = int(time.time() + hours * 3600)
     payload = f"{username}:{expiry}"
@@ -141,7 +157,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         target = STATIC_DIR / "index.html"
         try:
             html = target.read_text(encoding="utf-8")
-            stamp = str(int(max((STATIC_DIR / name).stat().st_mtime for name in ("app.js", "style.css"))))
+            stamp = _asset_stamp()
         except OSError:
             return ""
         html = html.replace('href="/static/style.css"', f'href="/static/style.css?v={stamp}"')
@@ -201,9 +217,14 @@ def create_app(runtime: Runtime) -> FastAPI:
         return response
 
     # -- state ------------------------------------------------------------- #
+    def _state_payload() -> dict:
+        payload = runtime.snapshot_state()
+        payload["asset_version"] = _asset_stamp()
+        return payload
+
     @app.get("/api/state")
     async def state() -> JSONResponse:
-        return JSONResponse(runtime.snapshot_state())
+        return JSONResponse(_state_payload())
 
     @app.get("/api/state/public")
     async def public_state() -> JSONResponse:
@@ -655,7 +676,7 @@ def create_app(runtime: Runtime) -> FastAPI:
         async def pump_state() -> None:
             while True:
                 try:
-                    payload = await asyncio.to_thread(runtime.snapshot_state)
+                    payload = await asyncio.to_thread(_state_payload)
                     await ws.send_text(json.dumps({"type": "state", "state": payload}, ensure_ascii=False))
                 except (WebSocketDisconnect, RuntimeError):
                     return
