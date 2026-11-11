@@ -52,12 +52,31 @@ def _format_value(value: Any) -> Any:
     return str(value)
 
 
+def _escape_json_string_body(value: Any) -> str:
+    """Escape một giá trị y như JSON escape phần thân của một chuỗi."""
+    return json.dumps(str(value), ensure_ascii=False)[1:-1]
+
+
+def _looks_like_json_text(text: str) -> bool:
+    """Đoán xem chuỗi payload có phải JSON viết tay hay chỉ là văn bản thường."""
+    stripped = text.lstrip()
+    return stripped.startswith(("{", "[", '"'))
+
+
 def render_payload(payload: Any, context: dict[str, Any]) -> Any:
     """Recursively substitute ``{{placeholders}}`` in a JSON payload.
 
     A string that is *exactly* one placeholder keeps the native type, so
     ``"{{class_counts}}"`` becomes a JSON object instead of a string.  Unknown
     placeholders are left untouched so mistakes are visible in the UI monitor.
+
+    Quy tắc escape (quan trọng cho payload dạng chuỗi JSON, ví dụ Tasmota
+    ``Backlog``): giá trị được chèn vào một payload **chuỗi** sẽ được escape
+    theo đúng kiểu JSON (``"`` ``\\`` và ký tự điều khiển) **chỉ khi** chuỗi
+    payload gốc trông giống JSON — tức là sau khi bỏ khoảng trắng đầu, nó bắt
+    đầu bằng ``{``, ``[`` hoặc ``"``.  Nhờ vậy ``'{"msg": "{{zone_name}}"}'``
+    vẫn là JSON hợp lệ, còn payload văn bản thường (``'Báo: {{zone_name}}'``)
+    giữ nguyên dạng người đọc được, không bị nhét thêm dấu ``\\``.
     """
     if isinstance(payload, str):
         if payload.startswith("{{") and payload.endswith("}}") and payload.count("{{") == 1:
@@ -65,6 +84,7 @@ def render_payload(payload: Any, context: dict[str, Any]) -> Any:
             if key in context:
                 return _format_value(context[key])
             return payload
+        escape_values = _looks_like_json_text(payload)
         result = payload
         for key, value in context.items():
             token = "{{" + key + "}}"
@@ -73,6 +93,8 @@ def render_payload(payload: Any, context: dict[str, Any]) -> Any:
                     result = result.replace(token, json.dumps(value, ensure_ascii=False))
                 elif isinstance(value, bool):
                     result = result.replace(token, "true" if value else "false")
+                elif escape_values:
+                    result = result.replace(token, _escape_json_string_body(value))
                 else:
                     result = result.replace(token, str(value))
         return result
@@ -157,8 +179,13 @@ class MqttPublisher:
         *,
         logger: logging.Logger | None = None,
         on_event: Callable[[dict], None] | None = None,
+        on_manual_override: Callable[[str], None] | None = None,
     ) -> None:
         self.cfg = cfg
+        #: ``topic -> zone_ref``: nghe các topic trạng thái của thiết bị để biết
+        #: người dùng vừa chỉnh tay (bấm công tắc tường) mà tạm dừng tự động.
+        self._on_manual_override = on_manual_override
+        self._override_topics: dict[str, str] = {}
         self.log = logger or LOGGER.getChild("mqtt")
         self._on_event = on_event
         self._client = None
@@ -182,18 +209,44 @@ class MqttPublisher:
 
     @dry_run.setter
     def dry_run(self, value: bool) -> None:
+        self._set_dry_run(bool(value))
+
+    def _set_dry_run(self, value: bool) -> None:
+        """Đổi cờ dry-run; bật lên thì dọn luôn hàng đợi để không rò rỉ lệnh thật."""
         self._dry_run = bool(value)
         self.log.warning("Dry-run %s", "BẬT" if self._dry_run else "TẮT")
+        if self._dry_run:
+            self._clear_pending("dry-run vừa được bật")
 
     @property
     def connected(self) -> bool:
         return self._connected.is_set()
 
+    def set_override_topics(self, mapping: dict[str, str]) -> None:
+        """Đặt bảng ``state_topic -> zone_ref`` cho tính năng "tạm dừng khi chỉnh tay".
+
+        Được gọi mỗi khi cấu hình đổi. Nếu đang kết nối thì subscribe ngay.
+        """
+        with self._lock:
+            self._override_topics = dict(mapping)
+        client = self._client
+        if client is None or not self._connected.is_set():
+            return
+        for topic in mapping:
+            try:
+                client.subscribe(topic, qos=0)
+            except Exception:  # noqa: BLE001 - không được làm hỏng luồng MQTT
+                self.log.debug("Không subscribe được %s", topic, exc_info=True)
+
+    def override_topics(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._override_topics)
+
     def update_config(self, cfg: MqttConfig) -> None:
         """Apply a hot-reloaded broker config (reconnects when it changed)."""
         old = self.cfg
         self.cfg = cfg
-        self._dry_run = bool(cfg.dry_run)
+        self._set_dry_run(bool(cfg.dry_run))
         if (
             old.host != cfg.host
             or old.port != cfg.port
@@ -248,10 +301,20 @@ class MqttPublisher:
             self.log.info(
                 "Kết nối MQTT %s:%d (client_id=%s)", self.cfg.host, self.cfg.port, self.cfg.client_id
             )
-            self._client.connect_async(self.cfg.host, self.cfg.port, keepalive=self.cfg.keepalive)
-            self._client.loop_start()
+            client.connect_async(self.cfg.host, self.cfg.port, keepalive=self.cfg.keepalive)
+            client.loop_start()
         except Exception as exc:  # noqa: BLE001 - broker may be down at boot
             self._set_error(f"Không kết nối được MQTT {self.cfg.host}:{self.cfg.port}: {exc}")
+            # Dọn dẹp: nếu giữ client lỗi thì mọi start() sau đó return sớm và
+            # MQTT chết vĩnh viễn cho tới khi khởi động lại app.
+            try:
+                client.loop_stop()
+            except Exception:  # noqa: BLE001 - dọn dẹp không được phép ném lỗi
+                self.log.debug("Không dừng được vòng lặp MQTT sau lỗi", exc_info=True)
+            with self._lock:
+                if self._client is client:
+                    self._client = None
+            self._connected.clear()
 
     def stop(self, *, publish_offline: bool = True) -> None:
         self._stop.set()
@@ -259,7 +322,12 @@ class MqttPublisher:
         if client is None:
             return
         try:
-            if publish_offline and self._connected.is_set() and self.cfg.availability_topic:
+            if (
+                publish_offline
+                and not self._dry_run
+                and self._connected.is_set()
+                and self.cfg.availability_topic
+            ):
                 client.publish(self.cfg.availability_topic, "offline", qos=1, retain=True)
                 time.sleep(0.15)  # give the socket a moment to flush
             client.disconnect()
@@ -272,6 +340,9 @@ class MqttPublisher:
             self._connected.clear()
 
     def restart(self) -> None:
+        # Hàng đợi thuộc về broker cũ: bỏ hết trước khi nối lại để không phát
+        # lại lệnh cũ (hoặc lệnh của chế độ dry-run) sang broker mới.
+        self._clear_pending("khởi động lại kết nối MQTT")
         self.stop(publish_offline=True)
         self.start()
 
@@ -284,13 +355,15 @@ class MqttPublisher:
         self._connected_at = time.time()
         self._last_error = None
         self.log.info("Đã kết nối MQTT %s:%d", self.cfg.host, self.cfg.port)
-        if self.cfg.availability_topic:
+        if self.cfg.availability_topic and not self._dry_run:
             client.publish(self.cfg.availability_topic, "online", qos=1, retain=True)
             self._availability_published = True
         # monitor inbound traffic (our own retained states included)
         try:
             client.subscribe(f"{self.cfg.base_topic}/#", qos=0)
             client.subscribe("+/+/+/state", qos=0)
+            for topic in self.override_topics():
+                client.subscribe(topic, qos=0)
         except Exception:  # noqa: BLE001
             self.log.debug("Không subscribe được kênh monitor", exc_info=True)
         self._emit({"type": "mqtt_status", "connected": True, "error": None})
@@ -322,6 +395,15 @@ class MqttPublisher:
                 retain=bool(getattr(message, "retain", False)),
             )
         )
+        # Người dùng bấm công tắc tường / app khác đổi trạng thái thiết bị:
+        # đây là "chỉnh tay" → tạm dừng kịch bản của vùng đó.
+        with self._lock:
+            zone_ref = self._override_topics.get(message.topic)
+        if zone_ref and self._on_manual_override is not None:
+            try:
+                self._on_manual_override(zone_ref)
+            except Exception:  # noqa: BLE001 - callback lỗi không được giết paho thread
+                self.log.warning("Không xử lý được tín hiệu chỉnh tay cho %s", zone_ref, exc_info=True)
 
     # -- publishing ------------------------------------------------------- #
     def publish(
@@ -359,7 +441,10 @@ class MqttPublisher:
             return False
 
         if not self._connected.is_set():
-            dedupe_key = key or topic
+            # Một key có thể phát tới nhiều topic (một kịch bản bật nhiều thiết
+            # bị), nên khoá gộp phải gồm cả topic — nếu không topic thứ hai sẽ
+            # ghi đè topic thứ nhất và lệnh bị mất.
+            dedupe_key = f"{key}|{topic}" if key else topic
             with self._lock:
                 if len(self._pending) >= max(1, self.cfg.queue_max) and dedupe_key not in self._pending:
                     # evict the oldest queued state: only the latest matters
@@ -447,14 +532,85 @@ class MqttPublisher:
         )
         return False
 
+    def _queue_ttl_s(self) -> float:
+        """Tuổi tối đa của một lệnh chờ (giây). 0 = không giới hạn.
+
+        Đọc phòng thủ từ config: ``queue_ttl_s`` là tuỳ chọn, chưa có trong
+        config hiện tại thì dùng mặc định 900 giây (15 phút).
+        """
+        raw = getattr(self.cfg, "queue_ttl_s", 900)
+        try:
+            ttl = float(raw)
+        except (TypeError, ValueError):
+            return 900.0
+        return ttl if ttl > 0 else 0.0
+
+    def _drop_entry(self, command: PendingCommand, reason: str) -> MonitorEntry:
+        return MonitorEntry(
+            ts=time.time(),
+            direction="tx",
+            topic=command.topic,
+            payload=command.payload,
+            qos=command.qos,
+            retain=command.retain,
+            ok=False,
+            dry_run=self._dry_run,
+            scenario_id=command.scenario_id,
+            error=f"đã bỏ lệnh chờ: {reason}",
+        )
+
+    def _drop_pending_command(self, command: PendingCommand, reason: str) -> None:
+        """Ghi nhận một lệnh chờ bị bỏ (quá hạn, dry-run…)."""
+        self._dropped_total += 1
+        self.log.warning(
+            "Bỏ lệnh MQTT đã xếp hàng %s (%.0fs trước): %s",
+            command.topic,
+            max(0.0, time.time() - command.created_at),
+            reason,
+        )
+        self._record(self._drop_entry(command, reason))
+
+    def _clear_pending(self, reason: str) -> int:
+        """Xoá sạch hàng đợi và ghi log một lần vì sao bỏ."""
+        with self._lock:
+            dropped = list(self._pending.values())
+            self._pending.clear()
+        if not dropped:
+            return 0
+        topics = ", ".join(sorted({command.topic for command in dropped}))[:200]
+        self.log.warning(
+            "Đã bỏ %d lệnh MQTT đang xếp hàng (%s) vì %s — không phát lại.",
+            len(dropped),
+            topics,
+            reason,
+        )
+        for command in dropped:
+            self._dropped_total += 1
+            self._record(self._drop_entry(command, reason))
+        return len(dropped)
+
     def _flush_pending(self) -> None:
+        # Dry-run bật thì lệnh đã xếp hàng từ trước KHÔNG được phát thật.
+        if self._dry_run:
+            self._clear_pending("dry-run đang bật")
+            return
         with self._lock:
             pending = list(self._pending.values())
             self._pending.clear()
         if not pending:
             return
+        ttl_s = self._queue_ttl_s()
         for command in sorted(pending, key=lambda c: c.created_at):
+            if self._dry_run:
+                # cờ vừa bật trong lúc đang xả hàng đợi
+                self._drop_pending_command(command, "dry-run đang bật")
+                continue
             age = time.time() - command.created_at
+            if ttl_s and age > ttl_s:
+                self._drop_pending_command(
+                    command, f"quá cũ ({age:.0f}s > {ttl_s:.0f}s) — trạng thái này không còn đúng"
+                )
+                continue
             self.log.info(
                 "Gửi lại trạng thái mới nhất %s sau %.1fs mất kết nối", command.topic, age
             )
