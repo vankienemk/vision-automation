@@ -22,7 +22,7 @@ from app.config import (
     merge_masked,
     save_config,
 )
-from app.config import ZoneConfig
+from app.config import LoggingConfig, ZoneConfig, starter_config
 
 
 # --------------------------------------------------------------------------- #
@@ -502,3 +502,19 @@ def test_overlap_ratio_bounds_are_validated() -> None:
                     "overlap_ratio": bad,
                 }
             )
+
+
+def test_log_retention_defaults_to_30_days_and_is_bounded():
+    """Yêu cầu người dùng: "Nhật ký có limit trong khoảng 30 ngày"."""
+    import pydantic
+
+    cfg = starter_config()
+    assert cfg.logging.retention_days == 30
+
+    cfg.logging.retention_days = 7
+    assert cfg.logging.retention_days == 7
+
+    with pytest.raises(pydantic.ValidationError):
+        LoggingConfig(retention_days=0)
+    with pytest.raises(pydantic.ValidationError):
+        LoggingConfig(retention_days=400)

@@ -289,7 +289,8 @@ Bỏ qua bước nào cũng được — mọi thứ sửa lại được sau tr
 - Thống kê: FPS camera, FPS suy luận, thời gian suy luận, thiết bị, số vùng đang có người,
   **Trễ hình** (tuổi của khung đang hiển thị — rê chuột để xem thêm thời gian đọc khung
   và fps nguồn báo).
-- Header: 3 đèn trạng thái (Camera / MQTT / Model), công tắc **Dry-run**, thời gian hoạt động.
+- Header: 3 đèn trạng thái (Camera / MQTT / Model), công tắc **Dry-run**, thời gian hoạt động,
+  và nút **⏻ Tắt ứng dụng** (bấm là hiện hộp thoại xác nhận — xem [§13.1](#131-tắt-ứng-dụng--dọn-dẹp-định-kỳ)).
 - Mất camera: khung hình **đứng ở ảnh cuối** + cảnh báo đỏ, UI **không bao giờ treo**.
 - Hình bị trễ (đường truyền đệm khung): cảnh báo vàng `Hình đang trễ X.X s` —
   xem [§16](#16-xử-lý-sự-cố) để biết cách khắc phục.
@@ -297,7 +298,8 @@ Bỏ qua bước nào cũng được — mọi thứ sửa lại được sau tr
   **tuổi khung hình (ms)**, thời gian đọc khung, FPS/thời gian suy luận, lần suy luận
   gần nhất cách đây bao lâu, **số lỗi suy luận**, số lần mở lại kết nối, trạng thái
   từng vùng (kèm "chờ xác nhận vắng" và "đang mô phỏng"), MQTT đã gửi/nhận và số lệnh
-  đang xếp hàng.
+  đang xếp hàng, cùng dòng **tài nguyên**: RAM của tiến trình, **ổ đĩa còn trống**,
+  dung lượng thư mục nhật ký và hạn giữ nhật ký (mặc định 30 ngày).
 - **Giải thích quyết định**: danh sách 30 quyết định gần nhất, mỗi dòng nói rõ
   *vì sao* có (hoặc không có) lệnh — ví dụ
   `Gửi “Giảm sáng” tới zigbee2mqtt/den_bep/set vì vùng “Khu bếp” đã trống đủ thời gian chờ rời vùng`.
@@ -618,10 +620,40 @@ UI hiển thị **FPS camera / FPS suy luận / ms suy luận** để bạn cân
 | Mất MQTT | Hàng chờ **có giới hạn** (`queue_max`), mỗi kịch bản chỉ giữ **1 lệnh mới nhất**; khi kết nối lại chỉ gửi trạng thái mới nhất (không phát lại ON→OFF cũ) |
 | Khởi động app | Trạng thái vùng là **unknown** → **không gửi OFF oan**; chỉ khi xác định được mới gửi lệnh |
 | Tắt app (SIGTERM/Ctrl-C) | Gửi `offline` (LWT/availability), đóng luồng camera, lưu config |
+| Tắt app từ điện thoại | Nút **⏻ Tắt ứng dụng** ngay cạnh logo (có hộp thoại xác nhận) — gọi `POST /api/system/shutdown`, chạy đúng quy trình tắt an toàn như Ctrl-C |
 | Lỗi suy luận (model/thiếu torch) | Chuyển sang `NullDetector`, app vẫn chạy camera + UI, log rõ cách cài |
 | Thiếu ultralytics/torch | App **không crash**, cảnh báo, hướng dẫn cài |
 | Lỗi ở một camera | **Cô lập theo luồng**: camera khác không bị ảnh hưởng |
-| Log phình to | `RotatingFileHandler` (5 MB × 3 bản) |
+| Log phình to | `RotatingFileHandler` (5 MB × 3 bản) **và** tự xoá nhật ký/ảnh chụp cũ hơn `logging.retention_days` (mặc định **30 ngày**), kiểm tra lúc khởi động + mỗi giờ |
+| RAM / ổ đĩa | Bảng chẩn đoán hiện **RAM, ổ đĩa trống, dung lượng nhật ký, hạn giữ log**; trạng thái camera đã xoá được dọn khỏi bộ nhớ (không rò rỉ khi thêm/xoá camera nhiều lần) |
+
+### 13.1 Tắt ứng dụng & dọn dẹp định kỳ
+
+**Nút ⏻ Tắt ứng dụng** (cạnh logo, có ở mọi tab) mở hộp thoại xác nhận rồi gọi
+`POST /api/system/shutdown`. Ứng dụng dừng **đúng quy trình an toàn** như Ctrl-C:
+
+1. Gửi trạng thái `offline` cho MQTT (và lệnh tắt đèn theo timeline của kịch bản nếu có);
+2. Đóng mọi luồng camera (nhả webcam, tắt đèn LED);
+3. Lưu `config.yaml` + `config.yaml.bak`;
+4. Tab đang mở hiện màn hình *"Ứng dụng đã dừng"* kèm cách bật lại
+   (`Khoi-dong.bat` trên Windows / `python run.py`). Trình duyệt không treo.
+
+Khi app đã dừng, trang web tự ngừng gọi máy chủ (không xoay vòng lỗi mạng).
+
+**Dọn dẹp tự động (chạy 24/7 hàng tuần liền):**
+
+| Việc | Khi nào | Giới hạn |
+|---|---|---|
+| Nhật ký chính | `RotatingFileHandler` | `max_bytes` 5 MB × (`backup_count` 3 + 1) ≈ 20 MB |
+| Nhật ký/ảnh chụp cũ | Lúc khởi động + **mỗi giờ** | Xoá file cũ hơn `logging.retention_days` = **30 ngày** |
+| Ảnh chụp (Snapshot) | Mỗi lần chụp | 50 ảnh/camera và không quá 30 ngày |
+| Sự kiện trong RAM | liên tục | `event_ring` 500 sự kiện (vòng tròn, cố định) |
+| Hàng chờ MQTT | khi broker mất | `queue_max` 50, mỗi kịch bản giữ 1 lệnh mới nhất |
+| Trạng thái camera đã xoá | khi lưu cấu hình | Xoá khỏi bộ nhớ ngay (chống rò rỉ) |
+
+Số liệu thật trên M1: RAM ~**155–185 MB** khi chạy YOLO11n trên `mps` và bị stress
+liên tục (MJPEG + REST + WebSocket) — **không tăng** sau 10 phút; nhật ký 0.25 MB sau
+nhiều giờ chạy. Xem [§19](#19-những-gì-đã-chạy-thật-trên-máy-apple-silicon-m1).
 
 ---
 
@@ -722,6 +754,9 @@ mosquitto_pub -h 192.168.1.10 -t zigbee2mqtt/den_bep/set -m '{"state":"ON"}'
 | Kéo một điểm mà cả vùng chạy theo / hình chữ nhật bị méo | Đã sửa: **đa giác** chỉ dời đúng điểm đang kéo; **hình chữ nhật** kéo góc = đổi chiều dài/rộng (có kẹp, không lật), kéo chấm giữa cạnh = dời riêng cạnh đó. Kiểm tra ô **Kiểu vùng** đúng với ý bạn (kiểu được lưu vào config). |
 | Bấm vào chỗ khác tự chuyển sang vùng khác | Đã bỏ tự chuyển khi bấm bên trong vùng khác; chỉ chuyển khi bấm trúng **một điểm** của vùng đó, hoặc chọn trong danh sách **Vùng đang sửa**. |
 | Port 8080 bị chiếm | `--port 8090` hoặc `web.port: 8090`. |
+| Bấm **⏻ Tắt ứng dụng** mà app vẫn chạy | Xem log tab **Nhật ký** có `Dừng theo yêu cầu API` → `Đang dừng hệ thống…` → `Đã dừng`. Nếu không có: trình duyệt đang dùng `app.js` cũ (F5), hoặc app chạy bằng **systemd/NSSM** thì dịch vụ tự bật lại (dừng bằng `systemctl stop vision-automation` / NSSM) — xem [§13.1](#131-tắt-ứng-dụng--dọn-dẹp-định-kỳ). |
+| Ổ đĩa đầy dần sau nhiều tuần | Mở bảng chẩn đoán xem dòng **ổ đĩa trống / dung lượng nhật ký**. App tự xoá nhật ký + ảnh chụp cũ hơn `logging.retention_days` (mặc định **30 ngày**) mỗi giờ; giảm xuống 7–14 ngày nếu ổ nhỏ. Ảnh chụp giữ tối đa 50 ảnh/camera. |
+| RAM tăng dần theo ngày | Bảng chẩn đoán hiện **RAM** hiện tại; nếu tăng đều mà không giảm, xem `logs/vision-automation.log` có lặp lại lỗi suy luận/kết nối không (mỗi lỗi có thể giữ đối tượng). Đã sửa: trạng thái camera bị xoá từng nằm lại trong bộ nhớ mãi mãi. Khởi động lại app để giải phóng (nút ⏻). |
 
 Log chi tiết: `logs/vision-automation.log` (tự xoay vòng) và tab **Nhật ký**.
 
@@ -802,7 +837,7 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**275 test**) phủ:
+Bộ test (**296 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
 - **`tests/test_zones.py`** — hình học đa giác, **5 chế độ xác định trong vùng**
@@ -854,7 +889,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 275 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
+├── tests/                  # 296 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
@@ -914,7 +949,7 @@ Bảng dưới là kết quả đo được khi phát triển, không phải suy
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest` | **275/275 pass** (~35 s) |
+| `pytest` | **296/296 pass** (~38 s) |
 | RTSP thật `rtsp://192.168.1.50:554/live.sdp` (640×480, nguồn 10 fps) | chạy **> 6 phút liên tục**: `capture_fps 10.0`, `read_ms 110`, **`frame_age_ms 30`** (trước khi sửa: trễ ~3 s, hễ ~20 s lại `Luồng treo quá 10s`), **0** lần treo trong log, `FPS suy luận 4.0` |
 | Sự cố “treo liên tục + trễ 3 s” | hai lỗi gốc: (1) `_on_config_change` ném `IndexError` tại `running = {name.split("-", 1)[1] …}` nên **không bao giờ tạo luồng suy luận** cho camera thêm từ UI; (2) đọc RTSP bị **giới hạn tốc độ theo `fps`** nên khung dư dồn mãi → trễ dần rồi đứng. Đã sửa + thêm 6 test hồi quy |
 | Hot-reload bật/tắt camera đang chạy | `{"value": false}` → `Dừng luồng suy luận live_sdp`; `{"value": true}` → `Luồng suy luận live_sdp bắt đầu`; **không** còn `IndexError` |
@@ -935,6 +970,12 @@ Bảng dưới là kết quả đo được khi phát triển, không phải suy
 | Nhánh Windows (mô phỏng `sys.platform = "win32"`) | backend `CAP_DSHOW → CAP_MSMF`; quyền camera `not_required`; ffmpeg loopback `-f dshow … -c:v libx264`; hint `winget`; test trong `tests/test_platform.py` (**23 test**) |
 | Nhánh Linux (mô phỏng `linux`) | backend `CAP_V4L2`, device `/dev/video*`, ffmpeg `-f v4l2`, hint `apt` |
 | Đọc tay `os.replace` bị khoá (Windows AV) | `app/config.py:_replace_with_retry` thử lại 6 lần thay vì báo lỗi lưu config |
+| Nút **⏻ Tắt ứng dụng** (header) | Bấm → hộp thoại xác nhận (`#shutdown-modal`) với 3 hệ quả; **Huỷ** không gửi request nào; test `test_header_shutdown_button_asks_for_confirmation` |
+| `POST /api/system/shutdown` từ API | `{"ok":true}` → `API yêu cầu dừng ứng dụng từ 127.0.0.1` → `Dừng theo yêu cầu API` → `Đang dừng hệ thống…` → `Đã dừng`, `config.yaml` + `.bak` |
+| `diagnostics.resources` trên `/api/state` | `{rss_mb, disk{free_gb,used_percent}, logs{files,mb}, snapshots, app_disk_mb, retention_days, last_cleanup{removed,at}, pid}` |
+| Dọn nhật ký cũ | File `logs/vision-automation.log.5` (mtime 40 ngày) bị xoá, `retention_days: 30`; file đang ghi **không** bị xoá (test `test_housekeeping_keeps_the_current_log_file`) |
+| Chống rò rỉ khi xoá camera | Sau `delete_camera("cam_anh")`: `_cameras`, `_infer_errors`, `_infer_last_error`, `_state_since_wall` **không còn** khoá `cam_anh` |
+| Stress 10 phút (MJPEG 4 s/vòng liên tục + 30 lần `/api/state` + WebSocket mở/đóng) | RAM **dao động 153–185 MB, không tăng** (sau khi torch nhả bộ đệm lần đầu: 474 → 338 → 153 MB rồi đi ngang); nhật ký 0.25 MB; hàng chờ MQTT giữ **2** lệnh |
 
 **Sửa lỗi trình sửa vùng + chọn camera (đã kiểm bằng chạy thật + mô phỏng JS):**
 

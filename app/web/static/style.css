@@ -479,3 +479,33 @@ button.btn.attention {
 .dot.off { background: #64748b; box-shadow: 0 0 8px #64748b66; }
 .diag-cam.off { border-color: #334155; opacity: 0.85; }
 .diag-note { margin-top: 6px; font-size: 12px; color: #94a3b8; }
+
+/* Nút "Tắt ứng dụng" cạnh logo */
+.brand .btn#btn-shutdown { margin-left: 4px; white-space: nowrap; }
+
+/* Màn hình sau khi bấm Tắt ứng dụng */
+.stopped-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: #0b1220f2;
+  backdrop-filter: blur(3px);
+}
+.stopped-box {
+  max-width: 520px;
+  padding: 28px 26px;
+  text-align: center;
+  border: 1px solid #334155;
+  border-radius: 14px;
+  background: #0f172a;
+  box-shadow: 0 20px 50px #000a;
+}
+.stopped-icon { font-size: 44px; line-height: 1; margin-bottom: 10px; color: #f87171; }
+.stopped-box h2 { margin: 0 0 10px; font-size: 20px; color: #e2e8f0; }
+.stopped-box p { margin: 8px 0; line-height: 1.6; color: #cbd5e1; }
+.stopped-box .ok { color: #4ade80; }
+.stopped-box .warn { color: #fbbf24; }

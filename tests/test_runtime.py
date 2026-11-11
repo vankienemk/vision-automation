@@ -553,3 +553,96 @@ def test_camera_status_distinguishes_lost_from_starting(image_path, tmp_path) ->
     assert runtime._camera_status(camera, {"connected": False, "error": "Mất tín hiệu"}) == "lost"
     assert runtime._camera_status(camera, {"connected": True, "stale": True}) == "stale"
     assert runtime._camera_status(camera, {"connected": True, "stale": False}) == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# bộ nhớ / ổ đĩa: dọn trạng thái camera đã xoá + dọn nhật ký cũ
+# --------------------------------------------------------------------------- #
+def test_deleting_a_camera_drops_its_runtime_state(image_path, tmp_path) -> None:
+    """Xoá camera phải xoá luôn trạng thái runtime của nó (chống rò rỉ bộ nhớ)."""
+    runtime = make_runtime(image_path, tmp_path)
+    runtime.start()
+    try:
+        assert wait_for(lambda: runtime.capture.get("cam_anh").latest()) is not None
+        runtime.detector = FakeDetector()
+        runtime.detector_enabled = True
+        runtime._start_inference("cam_anh")
+        assert wait_for(
+            lambda: runtime.camera_view("cam_anh")["zone_states"].get("khu_bep", {}).get("occupied")
+        )
+
+        runtime._infer_errors["cam_anh"] = 2
+        runtime._infer_last_error["cam_anh"] = "boom"
+        runtime._state_since_wall["cam_anh/khu_bep"] = 1.0
+        assert "cam_anh" in runtime._cameras
+
+        assert runtime.delete_camera("cam_anh")["ok"] is True
+
+        assert "cam_anh" not in runtime._cameras
+        assert "cam_anh" not in runtime._infer_errors
+        assert "cam_anh" not in runtime._infer_last_error
+        assert not [key for key in runtime._state_since_wall if key.startswith("cam_anh/")]
+        assert runtime.diagnostics()["cameras"] == {}
+        assert runtime.scenario_engine.status() == []
+    finally:
+        runtime.stop()
+
+
+def test_housekeeping_deletes_logs_older_than_retention(image_path, tmp_path) -> None:
+    """``logging.retention_days`` (mặc định 30) phải thực sự xoá file cũ."""
+    runtime = make_runtime(image_path, tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    old = logs / "vision-automation.log.5"
+    old.write_text("cu", encoding="utf-8")
+    import os
+
+    stamp = time.time() - 40 * 86400
+    os.utime(old, (stamp, stamp))
+    fresh = logs / "loopback-ffmpeg.log"
+    fresh.write_text("moi", encoding="utf-8")
+
+    runtime.config.logging.file = str(logs / "vision-automation.log")
+    runtime.config.logging.retention_days = 30
+    runtime.config.web.snapshot_dir = str(tmp_path / "snapshots")
+
+    report = runtime.run_housekeeping(force=True)
+
+    assert report["removed"] == 1
+    assert not old.exists()
+    assert fresh.exists()
+    assert runtime.config.logging.retention_days == 30
+
+
+def test_housekeeping_keeps_the_current_log_file(image_path, tmp_path) -> None:
+    """File nhật ký đang ghi không bao giờ bị xoá, kể cả khi mtime cũ."""
+    runtime = make_runtime(image_path, tmp_path)
+    logs = tmp_path / "logs"
+    logs.mkdir(exist_ok=True)
+    current = logs / "vision-automation.log"
+    current.write_text("dang ghi", encoding="utf-8")
+    import os
+
+    stamp = time.time() - 400 * 86400
+    os.utime(current, (stamp, stamp))
+
+    runtime.config.logging.file = str(current)
+    runtime.config.web.snapshot_dir = str(tmp_path / "snapshots")
+    report = runtime.run_housekeeping(force=True)
+
+    assert current.exists()
+    assert report["removed"] == 0
+
+
+def test_diagnostics_reports_resources(image_path, tmp_path) -> None:
+    runtime = make_runtime(image_path, tmp_path)
+    runtime.config.logging.file = str(tmp_path / "logs" / "vision-automation.log")
+    runtime.config.web.snapshot_dir = str(tmp_path / "snapshots")
+
+    resources = runtime.diagnostics()["resources"]
+
+    assert resources["retention_days"] == 30
+    assert resources["disk"]["ok"] is True
+    assert resources["logs"]["files"] >= 0
+    assert "rss_mb" in resources
+    assert resources["pid"] > 0

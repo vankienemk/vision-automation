@@ -234,3 +234,4 @@ logging:
   max_bytes: 5000000          # tự xoay vòng log, không phình ổ cứng
   backup_count: 3
   event_ring: 500             # số sự kiện giữ trong bộ nhớ cho tab Nhật ký
+  retention_days: 30          # tự xoá nhật ký + ảnh chụp cũ hơn 30 ngày (1..365)

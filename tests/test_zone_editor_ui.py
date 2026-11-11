@@ -268,6 +268,16 @@ def _state_payload() -> dict:
                 {"ts": 0, "time": "2026-01-01T10:00:00", "kind": "command", "message": "Gửi “Bật đèn” tới nha/den/set"},
             ],
             "warnings": [],
+            "resources": {
+                "rss_mb": 412.6,
+                "disk": {"ok": True, "total_gb": 994.7, "free_gb": 512.3, "used_percent": 48.5},
+                "logs": {"path": "logs", "files": 4, "bytes": 2_400_000, "mb": 2.29},
+                "snapshots": {"path": "snapshots", "files": 3, "bytes": 900_000, "mb": 0.86},
+                "app_disk_mb": 3.15,
+                "retention_days": 30,
+                "last_cleanup": {"at": 1_700_000_000.0, "removed": 2, "freed_bytes": 4096, "retention_days": 30},
+                "pid": 4242,
+            },
         },
     }
 
@@ -855,5 +865,64 @@ def test_disabled_camera_is_not_shown_as_lost(browser, ui_base_url):
         )
         page.wait_for_timeout(200)
         assert (page.inner_text("#lbl-camera")).strip() == "Camera đang tắt"
+    finally:
+        page.context.close()
+
+
+# --------------------------------------------------------------------------- #
+# 15. Nút "Tắt ứng dụng" trên header + dòng tài nguyên (RAM/ổ đĩa/nhật ký)
+# --------------------------------------------------------------------------- #
+def test_header_shutdown_button_asks_for_confirmation(open_zone_tab):
+    """Bấm ⏻ phải hiện hộp thoại xác nhận, không tắt ngay."""
+    page, _rect = open_zone_tab(1)
+    assert page.is_visible("#btn-shutdown")
+    page.click("#btn-shutdown")
+    page.wait_for_timeout(200)
+    assert page.is_visible("#shutdown-modal")
+    text = page.eval_on_selector("#shutdown-modal", "el => el.textContent")
+    assert "Tắt ứng dụng" in text, text
+    assert "Huỷ" in text, text  # luôn có đường thoát, không tắt ngay
+    # Huỷ ⇒ không có request dừng nào được gửi và modal biến mất.
+    from http.server import BaseHTTPRequestHandler  # noqa: PLC0415
+
+    handler = next(
+        cls for cls in BaseHTTPRequestHandler.__subclasses__() if cls.__name__ == "_Handler"
+    )
+    handler.posts.clear()
+    page.click("#shutdown-cancel")
+    page.wait_for_timeout(200)
+    assert not page.is_visible("#shutdown-modal")
+    assert not [p for p in handler.posts if "shutdown" in p[0]], handler.posts
+
+
+def test_diagnostics_shows_ram_disk_and_log_retention(open_zone_tab):
+    """Yêu cầu: kiểm tra tràn RAM/ổ đĩa + nhật ký giới hạn 30 ngày → phải thấy trên UI."""
+    page, _rect = open_zone_tab(1)
+    page.click("#tabs button[data-tab='live']")
+    page.wait_for_timeout(300)
+    summary = page.eval_on_selector("#diag-summary", "el => el.textContent")
+    assert "RAM" in summary
+    assert "413" in summary, summary       # 412.6 MB làm tròn
+    assert "512.3" in summary, summary     # ổ đĩa trống (GB)
+    assert "2.3" in summary, summary       # dung lượng nhật ký (MB)
+    assert "30 ngày" in summary, summary
+
+
+def test_settings_log_card_limits_logs_to_30_days(browser, ui_base_url):
+    """Yêu cầu: "Nhật ký có limit trong khoảng 30 ngày" → phải chỉnh được trên UI."""
+    page = _open_settings(browser, ui_base_url)
+    try:
+        assert page.input_value("#log-retention") == "30"
+        usage = page.eval_on_selector("#log-usage", "el => el.textContent")
+        assert "2.3" in usage or "Hiện dùng" in usage, usage
+        # đổi hạn giữ log rồi lưu ⇒ cấu hình gửi lên phải mang retention_days mới
+        page.fill("#log-retention", "14")
+        page.click("#settings-save")
+        page.wait_for_timeout(600)
+        sent = page.evaluate("() => window.__VO__.config")
+        assert sent is not None
+        cfg = page.evaluate("() => collectSettings()")
+        assert cfg["logging"]["retention_days"] == 14
+        assert cfg["logging"]["max_bytes"] >= 100000
     finally:
         page.context.close()

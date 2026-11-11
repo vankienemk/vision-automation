@@ -602,6 +602,12 @@ class LoggingConfig(_Base):
     max_bytes: int = Field(default=5_000_000, ge=100_000)
     backup_count: int = Field(default=3, ge=0, le=20)
     event_ring: int = Field(default=500, ge=50, le=20000)
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description="Số ngày giữ nhật ký cũ và ảnh chụp trước khi tự xoá (mặc định 30).",
+    )
 
     @field_validator("level")
     @classmethod

@@ -201,7 +201,13 @@ Nếu bạn có camera IP:
 
 ## Bước 8 — Tắt app đúng cách
 
-Tại cửa sổ **Terminal**: bấm **Ctrl + C** (giữ phím Control rồi bấm C).
+**Cách 1 (dễ nhất) — nút trên giao diện:** bấm **⏻ Tắt ứng dụng** ngay cạnh logo
+(trên điện thoại cũng bấm được) → hộp thoại hỏi lại → bấm **⏻ Tắt ngay**.
+App sẽ: gửi trạng thái *offline* cho MQTT (kèm lệnh tắt đèn theo kịch bản),
+đóng camera (đèn webcam tắt), lưu `config.yaml`, rồi màn hình hiện
+**"✅ Ứng dụng đã dừng"** kèm cách bật lại.
+
+**Cách 2 — trong cửa sổ Terminal:** bấm **Ctrl + C** (giữ phím Control rồi bấm C).
 
 **Bạn sẽ thấy** các dòng:
 ```
@@ -253,6 +259,7 @@ Trước khi chạy thật, kiểm tra 5 điều:
 | Trình duyệt báo **không truy cập được 127.0.0.1:8080** | App chưa chạy xong / đã tắt | Xem cửa sổ Terminal còn chạy không; đợi thêm 10 giây rồi tải lại trang |
 | Ô **Trễ hình** hiện **vàng (≥ 1 giây)**, hình "đi sau" thực tế | Đường truyền đang đệm khung | **Cài đặt** → `web.stream_width` 960 → 640, hoặc dùng **sub-stream** của camera (640×480), hoặc đổi Transport sang `udp` |
 | Băng đỏ **"Luồng treo quá 10s"** lặp lại đều đặn | Camera/NVR tự ngắt luồng, hoặc mạng chập chờn | App **tự nối lại** (không cần làm gì). Nếu lặp mãi: kiểm tra dây/Wi-Fi của camera, hạ độ phân giải — xem `README.md` §16.1 |
+| Ổ đĩa đầy dần / muốn biết app dùng bao nhiêu RAM | Mở tab **Trực tiếp** → khung **Chẩn đoán** có dòng *RAM … · Ổ đĩa trống … · Nhật ký … · giữ 30 ngày*. Đổi số ngày giữ log ở **Cài đặt → Nhật ký & ổ đĩa** (mặc định 30) |
 | **FPS suy luận 0.0** + vùng ghi **"Đang xác định…"** | Camera vừa thêm từ giao diện mà luồng suy luận chưa chạy | Khởi động lại app; nếu vẫn vậy, tắt rồi bật lại camera trong **Cài đặt** |
 
 Nút **?** ở góc trên phải giao diện luôn mở lại bảng trợ giúp này.
@@ -265,7 +272,7 @@ Nút **?** ở góc trên phải giao diện luôn mở lại bảng trợ giúp
 |---|---|
 | `config.yaml` | Toàn bộ cấu hình (tự tạo lần đầu). **Sửa qua giao diện**, không sửa tay |
 | `config.yaml.bak` | Bản sao lưu tự động của lần lưu trước |
-| `logs/vision-automation.log` | Nhật ký chi tiết — gửi file này khi cần hỗ trợ |
+| `logs/vision-automation.log` | Nhật ký chi tiết — gửi file này khi cần hỗ trợ (tự xoá sau **30 ngày**, xem ở tab Cài đặt → *Nhật ký & ổ đĩa*) |
 | `snapshots/` | Ảnh chụp **chỉ khi bạn bấm 📷 Chụp ảnh** (app không tự lưu ảnh — riêng tư) |
 | `Khoi-dong.command` | File bấm đúp để khởi động |
 | `README.md` | Tài liệu kỹ thuật đầy đủ (khi cần đọc sâu) |

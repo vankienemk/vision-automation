@@ -103,6 +103,7 @@ const S = {
   presetHint: '',
   pointerBusy: false,      // đang giữ chuột/ngón tay → KHÔNG dựng lại DOM
   camChecks: {},           // kết quả "Kiểm tra kết nối" của từng camera
+  stopped: false,          // người dùng đã bấm Tắt ứng dụng → ngừng nối lại
   assetVersion: null,      // phiên bản app.js/style.css lúc mở trang
   staleNotified: false,
 };
@@ -194,6 +195,7 @@ function connectWs() {
 }
 
 function scheduleWsRetry() {
+  if (S.stopped) return;            // đang tắt hệ thống: đừng nối lại
   S.wsRetry = Math.min(15, S.wsRetry + 1);
   setTimeout(connectWs, 500 * S.wsRetry);
 }
@@ -363,15 +365,31 @@ function renderDiagnostics() {
 
   const mqtt = diag.mqtt || {};
   const det = diag.detector || {};
+  const res = diag.resources || {};
   const summary = $('#diag-summary');
   if (summary) {
+    const disk = res.disk || {};
+    const logs = res.logs || {};
+    const lastCleanup = res.last_cleanup || {};
+    const cleanupText = lastCleanup.at
+      ? ('lần dọn gần nhất: ' + (lastCleanup.removed ? 'đã xoá ' + lastCleanup.removed + ' file cũ' : 'không có file cũ'))
+      : 'chưa chạy';
+    // Dòng tài nguyên: chạy 24/7 nên RAM và ổ đĩa là thứ người dùng cần thấy.
+    const resLine = (res.rss_mb == null && !disk.ok) ? '' :
+      'RAM: <b>' + (res.rss_mb == null ? '–' : Math.round(res.rss_mb) + ' MB') + '</b>' +
+      ' · Ổ đĩa trống: <b class="' + (disk.free_gb != null && disk.free_gb < 2 ? 'bad'
+        : (disk.free_gb != null && disk.free_gb < 10 ? 'warn' : '')) + '">' +
+        (disk.free_gb == null ? '–' : disk.free_gb.toFixed(1) + ' GB') + '</b>' +
+      ' · Nhật ký: <b>' + (logs.mb == null ? '–' : logs.mb.toFixed(1) + ' MB') + '</b>' +
+      ' · giữ ' + (res.retention_days || 30) + ' ngày (' + escapeHtml(cleanupText) + ')';
     setHtml(summary, [
       'Model: <b>' + escapeHtml(det.name || '–') + '</b> · thiết bị <b>' + escapeHtml(det.device || '–') + '</b>',
       'MQTT: <b>' + (mqtt.connected ? 'đã nối' : 'mất kết nối') + '</b>' +
         (mqtt.queued ? ' · <b class="warn">' + mqtt.queued + ' lệnh đang xếp hàng</b>' : '') +
         ' · đã gửi ' + (mqtt.sent || 0) + ' / nhận ' + (mqtt.received || 0),
       'Lỗi suy luận tổng: <b>' + (det.errors_total || 0) + '</b>',
-    ].map((line) => '<div class="diag-line">' + line + '</div>').join(''));
+      resLine,
+    ].filter(Boolean).map((line) => '<div class="diag-line">' + line + '</div>').join(''));
   }
 
   const decisions = $('#diag-decisions');
@@ -853,6 +871,19 @@ function renderSettings() {
   $('#auth-user').value = auth.username || 'admin';
   $('#auth-pass').value = auth.password || '****';
 
+  const logCfg = cfg.logging || {};
+  $('#log-retention').value = logCfg.retention_days || 30;
+  $('#log-maxmb').value = Math.round(((logCfg.max_bytes || 5000000) / 1000000) * 10) / 10;
+  $('#log-backups').value = logCfg.backup_count == null ? 3 : logCfg.backup_count;
+  const res = (S.state && S.state.diagnostics && S.state.diagnostics.resources) || {};
+  const usage = $('#log-usage');
+  if (usage) {
+    usage.textContent = res.logs
+      ? ('Hiện dùng: ' + (res.logs.mb || 0).toFixed(1) + ' MB trong ' + (res.logs.files || 0) +
+        ' file · ổ đĩa còn ' + ((res.disk && res.disk.free_gb) || '–') + ' GB')
+      : '';
+  }
+
   renderSettingsCameras();
 }
 
@@ -880,6 +911,11 @@ function collectSettings() {
   cfg.web.auth.enabled = $('#auth-enabled').checked;
   cfg.web.auth.username = $('#auth-user').value.trim() || 'admin';
   if ($('#auth-pass').value !== '****') cfg.web.auth.password = $('#auth-pass').value;
+
+  cfg.logging = cfg.logging || {};
+  cfg.logging.retention_days = Math.min(365, Math.max(1, Number($('#log-retention').value || 30)));
+  cfg.logging.max_bytes = Math.max(100000, Math.round(Number($('#log-maxmb').value || 5) * 1000000));
+  cfg.logging.backup_count = Math.min(20, Math.max(0, Number($('#log-backups').value || 3)));
   return cfg;
 }
 
@@ -2933,6 +2969,8 @@ function wireHeader() {
       toast('Dry-run ' + (value ? 'BẬT — không gửi lệnh thật' : 'TẮT — lệnh sẽ gửi thật'), value ? 'warn' : 'ok');
     } catch (e) { toast(e.message, 'err'); }
   });
+  const shutdownBtn = $('#btn-shutdown');
+  if (shutdownBtn) shutdownBtn.addEventListener('click', askShutdown);
   $('#btn-help').addEventListener('click', () => $('#help-modal').classList.add('show'));
   $('#help-close').addEventListener('click', () => $('#help-modal').classList.remove('show'));
 }
@@ -3434,3 +3472,97 @@ window.__VO__ = {
 };
 
 document.addEventListener('DOMContentLoaded', boot);
+
+// --------------------------------------------------------------------------
+// Tắt ứng dụng an toàn từ giao diện (nút ⏻ cạnh logo)
+//
+// Vì sao cần: máy chạy 24/7 không có màn hình; trước đây muốn dừng phải mở
+// Terminal (Ctrl-C) hoặc chạy Dung-lai.bat. Nút này gọi đúng endpoint mà
+// Dung-lai.bat dùng, nên hành vi giống hệt Ctrl-C: gửi MQTT "offline", đóng
+// camera, lưu config.yaml rồi thoát.
+// --------------------------------------------------------------------------
+function askShutdown() {
+  if (S.stopped) return;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'modal-backdrop show';
+  backdrop.id = 'shutdown-modal';
+  backdrop.innerHTML =
+    '<div class="modal" style="max-width:520px">' +
+      '<h2>⏻ Tắt ứng dụng?</h2>' +
+      '<p>Ứng dụng sẽ dừng <b>an toàn</b>:</p>' +
+      '<ul class="small" style="margin:8px 0 8px 18px;line-height:1.7">' +
+        '<li>gửi trạng thái <b>offline</b> cho MQTT và lệnh tắt đèn theo kịch bản,</li>' +
+        '<li>đóng mọi luồng camera (đèn webcam tắt),</li>' +
+        '<li>lưu <code>config.yaml</code> (kèm <code>.bak</code>).</li>' +
+      '</ul>' +
+      '<p class="small muted">Muốn chạy lại: bấm <b>Khoi-dong.bat</b> (Windows) hoặc chạy ' +
+        '<code>python run.py</code> trên máy này. Trình duyệt/phần mềm khác không bị ảnh hưởng.</p>' +
+      '<div class="row" style="justify-content:flex-end;gap:8px;margin-top:14px">' +
+        '<button class="btn ghost" id="shutdown-cancel">Huỷ</button>' +
+        '<button class="btn danger" id="shutdown-confirm">⏻ Tắt ngay</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  $('#shutdown-cancel').addEventListener('click', close);
+  backdrop.addEventListener('click', (event) => { if (event.target === backdrop) close(); });
+  $('#shutdown-confirm').addEventListener('click', async () => {
+    const btn = $('#shutdown-confirm');
+    btn.disabled = true;
+    btn.textContent = 'Đang dừng…';
+    try {
+      await api('/api/system/shutdown', { method: 'POST' });
+      close();
+      showStoppedScreen();
+    } catch (e) {
+      close();
+      toast('Không tắt được: ' + e.message, 'err');
+    }
+  });
+}
+
+function showStoppedScreen() {
+  S.stopped = true;
+  try { if (S.ws) S.ws.close(1000); } catch (e) {}
+  ['#live-img', '#zone-img'].forEach((sel) => {
+    const img = $(sel);
+    if (img) img.removeAttribute('src');    // ngắt luồng MJPEG
+  });
+  const screen = document.createElement('div');
+  screen.id = 'stopped-screen';
+  screen.className = 'stopped-screen';
+  screen.innerHTML =
+    '<div class="stopped-box">' +
+      '<div class="stopped-icon">⏻</div>' +
+      '<h2>Ứng dụng đang dừng</h2>' +
+      '<p class="small" id="stopped-text">Đang gửi MQTT offline, đóng camera và lưu cấu hình…</p>' +
+      '<p class="small muted">Khi dòng trên đổi thành “đã dừng”, bạn có thể đóng tab này.<br>' +
+      'Chạy lại: <b>Khoi-dong.bat</b> (Windows) hoặc <code>python run.py</code>.</p>' +
+    '</div>';
+  document.body.appendChild(screen);
+
+  // Chờ máy chủ thật sự ngừng trả lời rồi báo "đã dừng" (không đoán).
+  let attempts = 0;
+  const timer = setInterval(async () => {
+    attempts += 1;
+    let alive = false;
+    try {
+      const ctrl = new AbortController();
+      const kill = setTimeout(() => ctrl.abort(), 1200);
+      const res = await fetch('/api/state/public', { cache: 'no-store', signal: ctrl.signal });
+      clearTimeout(kill);
+      alive = res.ok;
+    } catch (e) { alive = false; }
+    const text = $('#stopped-text');
+    if (!alive && text) {
+      clearInterval(timer);
+      text.innerHTML = '✅ Ứng dụng <b>đã dừng</b> — đã lưu cấu hình, đã gửi MQTT offline.';
+      text.className = 'small ok';
+    } else if (attempts > 40 && text) {
+      clearInterval(timer);
+      text.innerHTML = 'Ứng dụng chưa dừng hẳn sau 40 giây. Kiểm tra log <code>logs/vision-automation.log</code> ' +
+        'hoặc tắt tiến trình python trong Task Manager.';
+      text.className = 'small warn';
+    }
+  }, 1000);
+}

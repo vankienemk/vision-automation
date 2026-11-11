@@ -58,6 +58,7 @@ from .config import (
 from .detection import Detection, shift_detection
 from .detector import Detector, build_detector
 from .netcheck import check_camera_source
+from . import housekeeping
 from . import platform_compat as compat
 from .mqtt_client import MqttPublisher, render_payload
 from .scenarios import CommandRequest, ScaledClock, ScenarioEngine
@@ -67,6 +68,8 @@ from .zones import ZoneEngine, ZoneState, zone_crop_box
 LOGGER = logging.getLogger(__name__)
 
 BASE_TOPIC_FALLBACK = "vision"
+#: Dọn nhật ký/ảnh chụp cũ mỗi giờ (chạy 24/7 nên đĩa không được phình ra).
+HOUSEKEEPING_INTERVAL_S = 3600.0
 
 
 # --------------------------------------------------------------------------- #
@@ -486,6 +489,10 @@ class Runtime:
         self._infer_consecutive_errors: dict[str, int] = {}
         self._infer_last_error: dict[str, str] = {}
         self._decisions: deque[dict[str, Any]] = deque(maxlen=80)
+        # Dọn dẹp định kỳ (nhật ký/ảnh chụp cũ) — chạy 24/7 nên phải tự tỉa đĩa.
+        self._last_cleanup: dict[str, Any] = {}
+        self._last_cleanup_at: float = 0.0
+        self._resource_cache: tuple[float, dict[str, Any]] | None = None
 
     # -- accessors -------------------------------------------------------- #
     @property
@@ -594,6 +601,8 @@ class Runtime:
         self._stop.clear()
         self._control_thread = threading.Thread(target=self._control_loop, name="control", daemon=True)
         self._control_thread.start()
+        # Tỉa nhật ký/ảnh chụp cũ ngay khi khởi động, rồi mỗi giờ một lần.
+        self.run_housekeeping(force=True)
         self.events.add("info", "Hệ thống đã sẵn sàng")
 
     def stop(self) -> None:
@@ -662,7 +671,13 @@ class Runtime:
                     engine.add_zone(zone)
             engines[camera.id] = engine
         self._zone_engines = engines
+        # Camera đã bị xoá khỏi cấu hình → bỏ luôn trạng thái runtime của nó.
+        # (Camera chỉ bị TẮT thì vẫn giữ để bảng chẩn đoán hiện "trạng thái cũ".)
+        known_cameras = {camera.id for camera in self.config.cameras}
         with self._cameras_lock:
+            for camera_id in list(self._cameras):
+                if camera_id not in known_cameras:
+                    self._cameras.pop(camera_id, None)
             for camera_id in engines:
                 state = self._cameras.get(camera_id)
                 if state is None:
@@ -671,6 +686,19 @@ class Runtime:
                     camera = self.config.camera(camera_id)
                     valid = {zone.id for zone in (camera.zones if camera else [])}
                     state.zones = {zid: zs for zid, zs in state.zones.items() if zid in valid}
+        # Bộ đếm lỗi theo camera cũng phải được tỉa, nếu không xoá/thêm camera
+        # nhiều lần sẽ để lại rác vĩnh viễn trong bộ nhớ.
+        for bucket in (
+            self._infer_errors,
+            self._infer_consecutive_errors,
+            self._infer_last_error,
+            self._state_since_wall,
+            self._last_custom_loss,
+        ):
+            for key in list(bucket):
+                owner = key.split("/", 1)[0] if isinstance(key, str) and "/" in key else key
+                if owner not in known_cameras:
+                    bucket.pop(key, None)
 
     # -- inference -------------------------------------------------------- #
     def _start_inference(self, camera_id: str) -> None:
@@ -1072,6 +1100,7 @@ class Runtime:
     def _control_loop(self) -> None:
         tick_interval = 0.2
         last_status: dict[str, bool] = {}
+        last_cleanup = 0.0
         while not self._stop.is_set():
             try:
                 started = time.perf_counter()
@@ -1083,11 +1112,55 @@ class Runtime:
                 for camera_id in self.capture.check_stale():
                     self.events.add("camera", f"Camera {camera_id} bị treo — đang kết nối lại", level="warning")
                 self._handle_camera_health(last_status)
+                if time.time() - last_cleanup >= HOUSEKEEPING_INTERVAL_S:
+                    last_cleanup = time.time()
+                    self.run_housekeeping()
                 elapsed = time.perf_counter() - started
                 self._stop.wait(max(0.05, tick_interval - elapsed))
             except Exception as exc:  # noqa: BLE001 - control loop must survive
                 self.log.error("Lỗi vòng điều khiển: %s", exc, exc_info=True)
                 self._stop.wait(1.0)
+
+    def run_housekeeping(self, *, force: bool = False) -> dict[str, Any]:
+        """Dọn nhật ký/ảnh chụp cũ hơn ``logging.retention_days`` (mặc định 30 ngày).
+
+        Chạy lúc khởi động và mỗi giờ một lần trong vòng điều khiển. Không bao
+        giờ ném lỗi ra ngoài: dọn dẹp thất bại chỉ ghi cảnh báo.
+        """
+        now = time.time()
+        if not force and self._last_cleanup_at and now - self._last_cleanup_at < 60.0:
+            return dict(self._last_cleanup or {})
+        retention = int(getattr(self.config.logging, "retention_days", 30) or 30)
+        log_file = getattr(self.config.logging, "file", None)
+        keep: list[Path] = []
+        if log_file:
+            base = Path(log_file)
+            keep.append(base)
+            for index in range(0, int(self.config.logging.backup_count) + 2):
+                keep.append(Path(f"{base}.{index}") if index else base)
+        try:
+            report = housekeeping.housekeep(
+                workdir=Path.cwd(),
+                log_dir=Path(log_file).parent if log_file else Path("logs"),
+                snapshot_dir=Path(self.config.web.snapshot_dir),
+                retention_days=retention,
+                keep=keep,
+                keep_per_camera=50,
+            )
+        except Exception as exc:  # noqa: BLE001 - housekeeping must never break the app
+            self.log.warning("Dọn dẹp định kỳ lỗi: %s", exc)
+            report = {"removed": 0, "freed_bytes": 0, "error": str(exc), "at": now}
+        self._last_cleanup_at = now
+        self._last_cleanup = report
+        if report.get("removed"):
+            self.events.add(
+                "system",
+                (
+                    f"Đã dọn {report['removed']} file cũ hơn {retention} ngày "
+                    f"(giải phóng {report.get('freed_mb', 0)} MB)"
+                ),
+            )
+        return dict(report)
 
     def _propagate_forced_states(self) -> None:
         """Advance simulated / fail-safe zones even without fresh frames."""
@@ -1712,7 +1785,29 @@ class Runtime:
             ],
             "decisions": self.decisions(30),
             "warnings": self.config.topic_warnings(),
+            "resources": self.resource_report(),
         }
+
+    def resource_report(self, *, max_age: float = 20.0) -> dict[str, Any]:
+        """RAM + dung lượng ổ đĩa cho bảng chẩn đoán (cache 20 giây)."""
+        now = time.time()
+        cached = getattr(self, "_resource_cache", None)
+        if cached is not None and now - cached[0] < max_age:
+            return dict(cached[1])
+        log_file = getattr(self.config.logging, "file", None)
+        log_dir = Path(log_file).parent if log_file else Path("logs")
+        try:
+            report = housekeeping.resources_report(
+                workdir=Path.cwd(),
+                log_dir=log_dir,
+                snapshot_dir=Path(self.config.web.snapshot_dir),
+                retention_days=int(getattr(self.config.logging, "retention_days", 30) or 30),
+                last_cleanup=self._last_cleanup,
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostics must never break the UI
+            report = {"error": str(exc)}
+        self._resource_cache = (now, report)
+        return dict(report)
 
     def webcams(self, *, max_age: float = 30.0) -> list[dict]:
         """Enumerate webcams, cached (the macOS query takes ~100 ms)."""

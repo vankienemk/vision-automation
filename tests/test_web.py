@@ -735,3 +735,22 @@ async def test_state_exposes_zone_analysis(tmp_path, image_path):
             assert isinstance(analysis["reason"], str) and analysis["reason"]
     finally:
         runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_state_exposes_resources_for_the_diagnostics_panel(tmp_path, image_path):
+    """Bảng chẩn đoán phải thấy RAM + dung lượng ổ đĩa + hạn giữ nhật ký."""
+    runtime = build_runtime(tmp_path, image_path)
+    runtime.config.logging.file = str(tmp_path / "logs" / "vision-automation.log")
+    runtime.config.web.snapshot_dir = str(tmp_path / "snapshots")
+    runtime.start()
+    try:
+        async with client_for(runtime) as client:
+            payload = (await client.get("/api/state")).json()
+            resources = payload["diagnostics"]["resources"]
+            assert resources["retention_days"] == 30
+            assert resources["disk"]["ok"] is True
+            assert "logs" in resources and "snapshots" in resources
+            assert resources["last_cleanup"].get("retention_days") == 30
+    finally:
+        runtime.stop()

@@ -16,6 +16,8 @@
       Vision Automation<br>
       <small id="uptime-label">đang khởi động…</small>
     </div>
+    <button class="btn small danger" id="btn-shutdown"
+            title="Dừng ứng dụng an toàn: gửi MQTT offline, đóng camera, lưu cấu hình">⏻ Tắt ứng dụng</button>
   </div>
 
   <div class="dots">
@@ -541,6 +543,20 @@
         <label class="field"><span>Mật khẩu</span><input type="password" id="auth-pass" placeholder="****"></label>
       </div>
       <p class="small muted">Đổi cổng cần khởi động lại app; các thay đổi khác áp dụng ngay.</p>
+    </div>
+
+    <div class="card">
+      <h2>Nhật ký &amp; ổ đĩa <span class="hint">giữ 24/7 không tràn ổ</span></h2>
+      <div class="grid3">
+        <label class="field"><span>Giữ nhật ký (ngày)</span>
+          <input type="number" id="log-retention" min="1" max="365" step="1" value="30">
+          <span class="small muted">File cũ hơn số ngày này tự bị xoá (kiểm tra mỗi giờ).</span></label>
+        <label class="field"><span>Kích thước tối đa mỗi file (MB)</span>
+          <input type="number" id="log-maxmb" min="0.1" max="100" step="0.1" value="5"></label>
+        <label class="field"><span>Số bản xoay vòng</span>
+          <input type="number" id="log-backups" min="0" max="20" step="1" value="3"></label>
+      </div>
+      <div class="small muted" id="log-usage"></div>
     </div>
 
     <div class="row" style="margin-bottom:20px">
