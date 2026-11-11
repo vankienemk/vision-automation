@@ -162,6 +162,19 @@ def _state_payload() -> dict:
                         },
                     },
                 },
+            },
+            {
+                "id": "cam_off",
+                "name": "Camera đang tắt",
+                "source": "rtsp",
+                "enabled": False,
+                "test": False,
+                "status": "off",
+                "capture": {"connected": False, "stale": False, "error": "camera đang tắt", "source": "rtsp"},
+                "inference": {"fps": 0.0, "ms": 0.0},
+                "detections": [],
+                "zones": [],
+                "zone_states": {},
             }
         ],
         "mqtt": {"connected": False, "dry_run": True},
@@ -175,6 +188,18 @@ def _state_payload() -> dict:
         "warnings": [],
         "diagnostics": {
             "cameras": {
+                "cam_off": {
+                    "status": "off",
+                    "enabled": False,
+                    "connected": False,
+                    "error": "camera đang tắt",
+                    "capture_fps": 0.0,
+                    "infer_fps": 0.0,
+                    "inference_errors": 0,
+                    "zones": {
+                        "vung_cu": {"occupied": True, "count": 1, "pending_exit_s": None, "forced": False},
+                    },
+                },
                 "cam_test": {
                     "enabled": True,
                     "connected": True,
@@ -705,8 +730,9 @@ def _open_settings(browser, ui_base_url):
 def test_settings_panel_is_not_rebuilt_when_nothing_changes(browser, ui_base_url):
     page = _open_settings(browser, ui_base_url)
     try:
-        # Đánh dấu node hiện tại; nếu panel bị dựng lại, dấu sẽ biến mất.
-        page.eval_on_selector("[data-cam-enabled]", "el => { el.__mark = 'giữ-nguyên'; }")
+        # Đánh dấu TẤT CẢ node hiện tại; nếu panel bị dựng lại, dấu sẽ biến mất.
+        # (trước đây chỉ đánh dấu 1 node nên bài test ngầm giả định chỉ có 1 camera)
+        page.eval_on_selector_all("[data-cam-enabled]", "els => els.forEach((el) => { el.__mark = 'giữ-nguyên'; })")
         page.evaluate("() => { for (let i = 0; i < 8; i += 1) window.__VO__.renderAll(); }")
         marks = page.eval_on_selector_all(
             "[data-cam-enabled]", "els => els.map(el => el.__mark || null)"
@@ -779,4 +805,55 @@ def test_stale_tab_gets_a_reload_banner(browser, ui_base_url):
         assert page.eval_on_selector_all("#ui-stale-reload", "els => els.length") == 1
     finally:
         _Handler.asset_version = "111"
+        page.context.close()
+
+def test_disabled_camera_is_not_shown_as_lost(browser, ui_base_url):
+    """Camera chủ động tắt phải hiện "đang tắt" (xám), không phải "mất hình" (đỏ).
+
+    Người dùng đã báo: tắt camera trong Cài đặt thì bảng chẩn đoán lại hiện
+    "mất hình" như thể có sự cố. Ngoài ra trạng thái vùng cũ không được khẳng
+    định "có người" nữa.
+    """
+    context = browser.new_context(viewport={"width": 1366, "height": 900})
+    page = context.new_page()
+    try:
+        page.goto(ui_base_url + "/", wait_until="domcontentloaded")
+        page.wait_for_function("() => window.__VO__ && window.__VO__.state", timeout=10000)
+        page.click("button[data-tab='logs']")   # tab có bảng chẩn đoán
+        page.wait_for_timeout(400)
+
+        card = page.eval_on_selector(
+            "#diag-cameras .diag-cam:nth-child(1)",
+            "el => ({cls: el.className, text: el.innerText})",
+        )
+        assert "đang tắt" in card["text"], card["text"]
+        assert "mất hình" not in card["text"], card["text"]
+        assert "bad" not in card["cls"], card["cls"]
+        # vùng của camera đang tắt: không khẳng định "có người"
+        assert "không đánh giá" in card["text"], card["text"]
+        assert "giữ trạng thái cũ" in card["text"], card["text"]
+
+        # tab Cài đặt: chấm xám + "tắt theo ý người dùng", không có ⚠
+        page.click("button[data-tab='settings']")
+        page.wait_for_selector("[data-cam-enabled='cam_off']", state="attached", timeout=5000)
+        page.wait_for_timeout(300)
+        text = page.inner_text("#settings-cameras")
+        assert "tắt theo ý người dùng" in text
+        assert "⚠ camera đang tắt" not in text
+        dots = page.eval_on_selector_all(
+            "#settings-cameras .zone-item .dot", "els => els.map(e => e.className)"
+        )
+        assert any("off" in cls for cls in dots), dots
+
+        # Tất cả camera đều tắt ⇒ nhãn đầu trang là "Camera đang tắt", không phải
+        # "Camera mất" (báo động sai).
+        page.evaluate(
+            "() => { const st = JSON.parse(JSON.stringify(window.__VO__.state));"
+            " st.cameras.forEach((c) => { c.enabled = false; c.status = 'off';"
+            " c.capture = Object.assign({}, c.capture, {connected: false}); });"
+            " window.__VO__.setState(st); }"
+        )
+        page.wait_for_timeout(200)
+        assert (page.inner_text("#lbl-camera")).strip() == "Camera đang tắt"
+    finally:
         page.context.close()

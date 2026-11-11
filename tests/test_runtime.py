@@ -517,3 +517,39 @@ def test_diagnostics_reports_reasons_and_counters(image_path, tmp_path) -> None:
     assert diagnostics["scenarios"], "phải có 'reason' cho từng kịch bản"
     assert all("reason" in row and row["reason"] for row in diagnostics["scenarios"])
     assert "cameras" in diagnostics and "decisions" in diagnostics and "warnings" in diagnostics
+
+
+# --------------------------------------------------------------------------- #
+# camera bị chủ động tắt KHÔNG được báo là "mất hình"
+# --------------------------------------------------------------------------- #
+def test_disabled_camera_is_reported_as_off_not_lost(image_path, tmp_path) -> None:
+    """Tắt camera trong Cài đặt mà bảng chẩn đoán lại báo "mất hình" (đỏ).
+
+    Người dùng đọc đó là sự cố hệ thống. Nay ``status`` do máy chủ quyết định:
+    ``off`` (tắt theo ý người dùng) khác hẳn ``lost`` (mất hình thật).
+    """
+    runtime = make_runtime(image_path, tmp_path)
+    runtime.start()
+    try:
+        assert wait_for(lambda: runtime.capture.get("cam_anh").latest()) is not None
+        assert runtime.diagnostics()["cameras"]["cam_anh"]["status"] == "ok"
+
+        assert runtime.set_camera_enabled("cam_anh", False)["ok"] is True
+        diag = runtime.diagnostics()["cameras"]["cam_anh"]
+        assert diag["enabled"] is False
+        assert diag["status"] == "off"
+        assert runtime.camera_view("cam_anh")["status"] == "off"
+
+        assert runtime.set_camera_enabled("cam_anh", True)["ok"] is True
+        assert wait_for(lambda: runtime.diagnostics()["cameras"]["cam_anh"]["status"] in {"ok", "starting"})
+    finally:
+        runtime.stop()
+
+
+def test_camera_status_distinguishes_lost_from_starting(image_path, tmp_path) -> None:
+    runtime = make_runtime(image_path, tmp_path)
+    camera = runtime.config.camera("cam_anh")
+    assert runtime._camera_status(camera, {"connected": False, "error": None}) == "starting"
+    assert runtime._camera_status(camera, {"connected": False, "error": "Mất tín hiệu"}) == "lost"
+    assert runtime._camera_status(camera, {"connected": True, "stale": True}) == "stale"
+    assert runtime._camera_status(camera, {"connected": True, "stale": False}) == "ok"

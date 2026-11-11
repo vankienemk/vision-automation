@@ -474,3 +474,8 @@ button.btn.attention {
   cursor: pointer;
 }
 .ui-stale-banner button:hover { background: #1e40af; }
+
+/* Camera bị người dùng chủ động tắt: xám, KHÔNG đỏ (không phải lỗi). */
+.dot.off { background: #64748b; box-shadow: 0 0 8px #64748b66; }
+.diag-cam.off { border-color: #334155; opacity: 0.85; }
+.diag-note { margin-top: 6px; font-size: 12px; color: #94a3b8; }

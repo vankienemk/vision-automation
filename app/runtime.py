@@ -1476,6 +1476,20 @@ class Runtime:
             self.events.add("error", f"Không thêm được camera test RTSP: {exc}", level="error")
 
     # -- state snapshots -------------------------------------------------- #
+    def _camera_status(self, camera: Any, status: dict) -> str:
+        """Một từ mô tả tình trạng camera để UI không phải tự đoán.
+
+        ``off`` — người dùng chủ động tắt: **không phải lỗi**, không được tô đỏ;
+        ``ok`` — đang có khung hình mới; ``stale`` — còn kết nối nhưng khung hình
+        đã cũ; ``lost`` — mất hình (có lỗi); ``starting`` — chưa có luồng nào
+        (vừa bật / đang mở lần đầu).
+        """
+        if not getattr(camera, "enabled", True):
+            return "off"
+        if status.get("connected"):
+            return "stale" if status.get("stale") else "ok"
+        return "lost" if status.get("error") else "starting"
+
     def camera_view(self, camera_id: str) -> dict | None:
         worker = self.capture.get(camera_id)
         camera = self.config.camera(camera_id)
@@ -1495,6 +1509,15 @@ class Runtime:
                 "static": bool(state.motion_static) if state else False,
                 "last_at": state.last_infer_at if state else None,
             }
+        capture = (
+            worker.status().as_dict()
+            if worker
+            else CaptureStatus(
+                camera_id=camera_id,
+                error=None if camera.enabled else "camera đang tắt",
+                source_desc=camera.source,
+            ).as_dict()
+        )
         return {
             "id": camera_id,
             "name": camera.name,
@@ -1518,15 +1541,8 @@ class Runtime:
             "zone_states": zones,
             "detections": detections,
             "inference": inference,
-            "capture": (
-                worker.status().as_dict()
-                if worker
-                else CaptureStatus(
-                    camera_id=camera_id,
-                    error=None if camera.enabled else "camera đang tắt",
-                    source_desc=camera.source,
-                ).as_dict()
-            ),
+            "capture": capture,
+            "status": self._camera_status(camera, capture),
         }
 
     def _scenario_views(self) -> list[dict]:
@@ -1622,6 +1638,7 @@ class Runtime:
                     else None
                 )
                 camera_rows[camera.id] = {
+                    "status": self._camera_status(camera, status),
                     "enabled": camera.enabled,
                     "source": camera.source,
                     "connected": bool(status.get("connected")),

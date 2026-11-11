@@ -304,19 +304,41 @@ function renderDiagnostics() {
     const zones = row.zones || {};
     const zoneRows = Object.keys(zones).map((zoneId) => {
       const zone = zones[zoneId] || {};
-      const state = zone.occupied === true ? '<span class="badge green">có người ×' + (zone.count || 1) + '</span>'
-        : (zone.occupied === false ? '<span class="badge gray">trống</span>' : '<span class="badge amber">chưa rõ</span>');
-      const wait = zone.pending_exit_s != null ? ' · chờ xác nhận vắng ' + Number(zone.pending_exit_s).toFixed(1) + 's' : '';
+      const cameraOff = row.enabled === false || row.status === 'off';
+      const last = zone.occupied === true ? 'có người ×' + (zone.count || 1)
+        : (zone.occupied === false ? 'trống' : 'chưa rõ');
+      // Camera tắt ⇒ trạng thái vùng là ảnh chụp cũ, không được khẳng định "có người".
+      const state = cameraOff
+        ? '<span class="badge gray">giữ trạng thái cũ: ' + escapeHtml(last) + '</span>'
+        : (zone.occupied === true ? '<span class="badge green">có người ×' + (zone.count || 1) + '</span>'
+          : (zone.occupied === false ? '<span class="badge gray">trống</span>' : '<span class="badge amber">chưa rõ</span>'));
+      const wait = zone.pending_exit_s != null && !cameraOff ? ' · chờ xác nhận vắng ' + Number(zone.pending_exit_s).toFixed(1) + 's' : '';
       const forced = zone.forced ? ' · <b>đang mô phỏng</b>' : '';
+      if (cameraOff) {
+        return '<div class="diag-row"><span class="mono">' + escapeHtml(zoneId) + '</span>' + state +
+          '<span class="small muted"> · không đánh giá (camera đang tắt)' + escapeHtml(forced) + '</span></div>';
+      }
       return '<div class="diag-row"><span class="mono">' + escapeHtml(zoneId) + '</span>' + state +
         '<span class="small muted">' + escapeHtml(wait + forced) + '</span></div>';
     }).join('');
-    const bad = row.connected ? '' : 'bad';
+    // Tình trạng do máy chủ quyết định (row.status). Camera người dùng chủ động
+    // TẮT không phải lỗi: trước đây nó hiện "mất hình" đỏ + viền đỏ, khiến người
+    // dùng tưởng hệ thống hỏng trong khi mọi thứ bình thường.
+    const CAM_STATUS = {
+      off: { cls: 'gray', text: 'đang tắt' },
+      ok: { cls: 'green', text: 'đang nhận hình' },
+      stale: { cls: 'amber', text: 'hình bị treo' },
+      lost: { cls: 'red', text: 'mất hình' },
+      starting: { cls: 'amber', text: 'đang kết nối' },
+    };
+    const camStatus = row.status || (row.enabled === false ? 'off' : (row.connected ? 'ok' : 'lost'));
+    const camInfo = CAM_STATUS[camStatus] || CAM_STATUS.lost;
+    const camOff = camStatus === 'off';
+    const bad = camStatus === 'lost' ? 'bad' : (camOff ? 'off' : '');
     return '<div class="diag-cam ' + bad + '">' +
       '<div class="diag-head"><b>' + escapeHtml(id) + '</b>' +
-      '<span class="badge ' + (row.connected ? 'green' : 'red') + '">' +
-      (row.connected ? 'đang nhận hình' : 'mất hình') + '</span>' +
-      (row.sampled_frame === false ? '<span class="badge amber">khung suy luận lỗi</span>' : '') +
+      '<span class="badge ' + camInfo.cls + '">' + camInfo.text + '</span>' +
+      (row.sampled_frame === false && !camOff ? '<span class="badge amber">khung suy luận lỗi</span>' : '') +
       '</div>' +
       '<div class="diag-grid">' +
       '<span>FPS camera</span><b>' + (row.capture_fps || 0).toFixed(1) + '</b>' +
@@ -331,8 +353,10 @@ function renderDiagnostics() {
         (row.inference_errors_consecutive ? ' (liên tiếp ' + row.inference_errors_consecutive + ')' : '') + '</b>' +
       '<span>Mở lại kết nối</span><b>' + (row.reconnects || 0) + '</b>' +
       '</div>' +
-      (row.error ? '<div class="diag-err">' + escapeHtml(row.error + (row.hint ? ' — ' + row.hint : '')) + '</div>' : '') +
-      (row.inference_last_error ? '<div class="diag-err">Suy luận: ' + escapeHtml(row.inference_last_error) + '</div>' : '') +
+      (camOff
+        ? '<div class="diag-note">Camera đang tắt theo ý người dùng — không phải lỗi. Bật lại bằng công tắc ở tab Cài đặt.</div>'
+        : (row.error ? '<div class="diag-err">' + escapeHtml(row.error + (row.hint ? ' — ' + row.hint : '')) + '</div>' : '')
+          + (row.inference_last_error ? '<div class="diag-err">Suy luận: ' + escapeHtml(row.inference_last_error) + '</div>' : '')) +
       '<div class="diag-zones">' + (zoneRows || '<span class="small muted">chưa có vùng</span>') + '</div>' +
       '</div>';
   }).join('') : '<p class="small muted">Chưa có camera.</p>');
@@ -373,9 +397,13 @@ function renderHeader() {
   const st = S.state;
   const cameras = st.cameras || [];
   const anyOnline = cameras.some((c) => c.capture && c.capture.connected);
+  // Camera bị người dùng tắt KHÔNG phải "Camera mất": nếu tất cả camera đều tắt
+  // thì chấm xám + nhãn "Camera đang tắt" để không báo động sai.
+  const allOff = cameras.length > 0 && cameras.every((c) => (c.status || (c.enabled === false ? 'off' : '')) === 'off');
   const camDot = $('#dot-camera');
-  camDot.className = 'dot ' + (cameras.length === 0 ? '' : (anyOnline ? 'ok' : 'bad'));
-  $('#lbl-camera').textContent = cameras.length === 0 ? 'Chưa có camera' : (anyOnline ? 'Camera OK' : 'Camera mất');
+  camDot.className = 'dot ' + (cameras.length === 0 ? '' : (anyOnline ? 'ok' : (allOff ? 'off' : 'bad')));
+  $('#lbl-camera').textContent = cameras.length === 0 ? 'Chưa có camera'
+    : (anyOnline ? 'Camera OK' : (allOff ? 'Camera đang tắt' : 'Camera mất'));
 
   const mqtt = st.mqtt || {};
   $('#dot-mqtt').className = 'dot ' + (mqtt.connected ? 'ok' : 'bad');
@@ -759,10 +787,13 @@ function renderSettingsCameras() {
     const check = (S.camChecks || {})[cam.id];
     // Dòng phụ: lỗi + gợi ý sửa (hint) — trước đây chỉ hiện "error" nên người
     // dùng không biết phải làm gì.
+    const camOff = cam.enabled === false || cam.status === 'off';
     let detail = escapeHtml(cam.id) + ' · ' + escapeHtml(cam.source) +
       ' · ' + escapeHtml(capture.source || '');
-    if (capture.error) detail += ' · ⚠ ' + escapeHtml(capture.error);
-    const hintLine = capture.hint
+    // Camera chủ động tắt: ghi "camera đang tắt", không gắn ⚠ (không phải lỗi).
+    if (camOff) detail += ' · tắt theo ý người dùng';
+    else if (capture.error) detail += ' · ⚠ ' + escapeHtml(capture.error);
+    const hintLine = (!camOff && capture.hint)
       ? '<div class="zmeta fix">💡 ' + escapeHtml(capture.hint) + '</div>' : '';
     const checkLine = check
       ? (check.pending
@@ -774,7 +805,7 @@ function renderSettingsCameras() {
           '</div>')
       : '';
     return '<div class="zone-item" style="margin-bottom:8px">' +
-      '<span class="dot ' + (capture.connected ? 'ok' : 'bad') + '"></span>' +
+      '<span class="dot ' + (camOff ? 'off' : (capture.connected ? 'ok' : 'bad')) + '"></span>' +
       '<div style="min-width:0"><div class="zname">' + escapeHtml(cam.name) +
       (cam.test ? ' <span class="badge amber">TEST</span>' : '') +
       (cam.enabled === false ? ' <span class="badge red">đang tắt</span>' : '') + '</div>' +
