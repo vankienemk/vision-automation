@@ -101,6 +101,8 @@ const S = {
   scenarioDraft: null,
   scenarioTrigger: null,   // loại điều kiện đang sửa bước
   presetHint: '',
+  pointerBusy: false,      // đang giữ chuột/ngón tay → KHÔNG dựng lại DOM
+  camChecks: {},           // kết quả "Kiểm tra kết nối" của từng camera
 };
 
 const ZE = {
@@ -208,6 +210,35 @@ function onEvent(event) {
 }
 
 /* --------------------------------------------------------------- rendering */
+/* Vì sao cần setHtml(): trạng thái được đẩy về 8 lần/giây, nên các khối như
+ * danh sách camera / nút mô phỏng bị dựng lại liên tục. Nếu dựng lại ĐÚNG LÚC
+ * người dùng đang giữ chuột thì node cũ bị xoá trước khi nhả chuột → trình
+ * duyệt KHÔNG bắn sự kiện click, người dùng thấy "nút bấm không ăn".
+ * Hai lớp bảo vệ: (1) chỉ ghi DOM khi HTML thật sự khác, (2) không ghi DOM khi
+ * đang giữ chuột — nhả ra sẽ vẽ lại một lần. */
+function setHtml(el, html) {
+  if (!el) return false;
+  if (el.__vaHtml === html) return false;
+  el.__vaHtml = html;
+  if (S.pointerBusy) { el.__vaPending = html; return false; }
+  el.__vaPending = null;
+  el.innerHTML = html;
+  return true;
+}
+
+function markPointerBusy(busy) {
+  const was = S.pointerBusy;
+  S.pointerBusy = busy;
+  if (was && !busy) renderAll();
+}
+
+function installPointerGuard() {
+  document.addEventListener('pointerdown', () => markPointerBusy(true), true);
+  document.addEventListener('pointerup', () => markPointerBusy(false), true);
+  document.addEventListener('pointercancel', () => markPointerBusy(false), true);
+  window.addEventListener('blur', () => markPointerBusy(false));
+}
+
 function renderAll() {
   if (!S.state) return;
   renderHeader();
@@ -238,7 +269,7 @@ function renderDiagnostics() {
   const diag = S.state.diagnostics || {};
   const cameras = diag.cameras || {};
   const ids = Object.keys(cameras);
-  box.innerHTML = ids.length ? ids.map((id) => {
+  setHtml(box, ids.length ? ids.map((id) => {
     const row = cameras[id] || {};
     const zones = row.zones || {};
     const zoneRows = Object.keys(zones).map((zoneId) => {
@@ -274,36 +305,36 @@ function renderDiagnostics() {
       (row.inference_last_error ? '<div class="diag-err">Suy luận: ' + escapeHtml(row.inference_last_error) + '</div>' : '') +
       '<div class="diag-zones">' + (zoneRows || '<span class="small muted">chưa có vùng</span>') + '</div>' +
       '</div>';
-  }).join('') : '<p class="small muted">Chưa có camera.</p>';
+  }).join('') : '<p class="small muted">Chưa có camera.</p>');
 
   const mqtt = diag.mqtt || {};
   const det = diag.detector || {};
   const summary = $('#diag-summary');
   if (summary) {
-    summary.innerHTML = [
+    setHtml(summary, [
       'Model: <b>' + escapeHtml(det.name || '–') + '</b> · thiết bị <b>' + escapeHtml(det.device || '–') + '</b>',
       'MQTT: <b>' + (mqtt.connected ? 'đã nối' : 'mất kết nối') + '</b>' +
         (mqtt.queued ? ' · <b class="warn">' + mqtt.queued + ' lệnh đang xếp hàng</b>' : '') +
         ' · đã gửi ' + (mqtt.sent || 0) + ' / nhận ' + (mqtt.received || 0),
       'Lỗi suy luận tổng: <b>' + (det.errors_total || 0) + '</b>',
-    ].map((line) => '<div class="diag-line">' + line + '</div>').join('');
+    ].map((line) => '<div class="diag-line">' + line + '</div>').join(''));
   }
 
   const decisions = $('#diag-decisions');
   if (decisions) {
     const rows = diag.decisions || [];
-    decisions.innerHTML = rows.length ? rows.slice().reverse().map((item) =>
+    setHtml(decisions, rows.length ? rows.slice().reverse().map((item) =>
       '<div class="diag-decision"><span class="mono">' + escapeHtml((item.time || '').slice(11)) + '</span>' +
       '<span class="' + (item.kind === 'command' ? 'ok' : '') + '">' + escapeHtml(item.message || '') + '</span></div>'
-    ).join('') : '<p class="small muted">Chưa có quyết định nào.</p>';
+    ).join('') : '<p class="small muted">Chưa có quyết định nào.</p>');
   }
 
   const warnBox = $('#diag-warnings');
   if (warnBox) {
     const warnings = (S.state.warnings || []).concat(diag.warnings || []);
-    warnBox.innerHTML = warnings.length
+    setHtml(warnBox, warnings.length
       ? warnings.map((text) => '<div class="diag-err">⚠ ' + escapeHtml(text) + '</div>').join('')
-      : '';
+      : '');
     warnBox.classList.toggle('show', warnings.length > 0);
   }
 }
@@ -464,7 +495,7 @@ function renderLive() {
   }
 
   const list = $('#live-zones');
-  list.innerHTML = zones.length ? zones.map((zone) => {
+  setHtml(list, zones.length ? zones.map((zone) => {
     const zs = (cam.zone_states || {})[zone.id] || {};
     const state = zs.occupied === true ? 'green' : (zs.occupied === false ? 'gray' : 'amber');
     const label = zs.occupied === true ? ('Có người ×' + (zs.count || 1)) :
@@ -487,7 +518,7 @@ function renderLive() {
       '<div><div class="zname">' + escapeHtml(zone.name || zone.id) + '</div>' +
       '<div class="zmeta">' + escapeHtml(meta + why) + '</div>' + detail + '</div>' +
       '<div class="zright"><span class="badge ' + state + '">' + label + '</span></div></div>';
-  }).join('') : '<p class="small muted">Camera này chưa có vùng nào. Sang tab “Vùng phát hiện” để vẽ.</p>';
+  }).join('') : '<p class="small muted">Camera này chưa có vùng nào. Sang tab “Vùng phát hiện” để vẽ.</p>');
 }
 
 function tokenSuffix() {
@@ -565,10 +596,10 @@ function renderScenarioStatus(target) {
   if (!target) return;
   const scenarios = (S.state && S.state.scenarios) || [];
   if (!scenarios.length) {
-    target.innerHTML = '<p class="small muted">Chưa có kịch bản nào.</p>';
+    setHtml(target, '<p class="small muted">Chưa có kịch bản nào.</p>');
     return;
   }
-  target.innerHTML = scenarios.map((sc) => {
+  setHtml(target, scenarios.map((sc) => {
     const pending = (sc.pending || [])[0];
     const badge = sc.occupied === true ? '<span class="badge green">Có người</span>' :
       (sc.occupied === false ? '<span class="badge gray">Trống</span>' : '<span class="badge amber">Chưa rõ</span>');
@@ -592,7 +623,7 @@ function renderScenarioStatus(target) {
       '<div class="bar"><i style="width:' + width + '"></i></div>' +
       (sc.reason ? '<div class="why">💡 ' + escapeHtml(sc.reason) + '</div>' : '') +
       '</div>';
-  }).join('');
+  }).join(''));
 }
 
 /* ============================ SIMULATION TAB =========================== */
@@ -620,7 +651,7 @@ function renderSimulator() {
         '</div></div>');
     });
   });
-  container.innerHTML = rows.length ? rows.join('') : '<p class="small muted">Chưa có vùng nào để mô phỏng.</p>';
+  setHtml(container, rows.length ? rows.join('') : '<p class="small muted">Chưa có vùng nào để mô phỏng.</p>');
 
   $$('#sim-speed .chip').forEach((chip) => {
     chip.classList.toggle('active', Number(chip.dataset.scale) === Number(sim.scale || 1));
@@ -676,12 +707,12 @@ async function loadMonitor() {
     const data = await api('/api/mqtt/monitor?topic=' + encodeURIComponent(topic) +
       '&direction=' + encodeURIComponent(direction) + '&limit=150');
     const tbody = $('#mon-table tbody');
-    tbody.innerHTML = (data.entries || []).slice().reverse().map((entry) =>
+    setHtml(tbody, (data.entries || []).slice().reverse().map((entry) =>
       '<tr><td class="mono">' + escapeHtml(entry.time) + '</td>' +
       '<td>' + (entry.direction === 'tx' ? '↑ gửi' : '↓ nhận') + (entry.dry_run ? ' (dry)' : '') + '</td>' +
       '<td class="mono">' + escapeHtml(entry.topic) + '</td>' +
       '<td class="mono">' + escapeHtml(entry.payload) + '</td>' +
-      '<td>' + (entry.ok ? '✔' : '✘') + '</td></tr>').join('');
+      '<td>' + (entry.ok ? '✔' : '✘') + '</td></tr>').join(''));
   } catch (e) { toast(e.message, 'err'); }
 }
 
@@ -690,20 +721,38 @@ function renderSettingsCameras() {
   const container = $('#settings-cameras');
   const cameras = (S.state && S.state.cameras) || [];
   if (!cameras.length) {
-    container.innerHTML = '<p class="small muted">Chưa có camera nào.</p>';
+    setHtml(container, '<p class="small muted">Chưa có camera nào.</p>');
     return;
   }
-  container.innerHTML = cameras.map((cam) => {
+  setHtml(container, cameras.map((cam) => {
     const capture = cam.capture || {};
+    const check = (S.camChecks || {})[cam.id];
+    // Dòng phụ: lỗi + gợi ý sửa (hint) — trước đây chỉ hiện "error" nên người
+    // dùng không biết phải làm gì.
+    let detail = escapeHtml(cam.id) + ' · ' + escapeHtml(cam.source) +
+      ' · ' + escapeHtml(capture.source || '');
+    if (capture.error) detail += ' · ⚠ ' + escapeHtml(capture.error);
+    const hintLine = capture.hint
+      ? '<div class="zmeta fix">💡 ' + escapeHtml(capture.hint) + '</div>' : '';
+    const checkLine = check
+      ? (check.pending
+        ? '<div class="zmeta">⏳ Đang kiểm tra kết nối…</div>'
+        : '<div class="zmeta ' + (check.ok ? 'fix ok' : 'fix bad') + '">' +
+          (check.ok ? '✔ ' : '✖ ') + escapeHtml(check.message || '') +
+          (check.hint ? '<br>💡 ' + escapeHtml(check.hint) : '') +
+          (check.detail ? '<br><span class="mono muted">' + escapeHtml(check.detail) + '</span>' : '') +
+          '</div>')
+      : '';
     return '<div class="zone-item" style="margin-bottom:8px">' +
       '<span class="dot ' + (capture.connected ? 'ok' : 'bad') + '"></span>' +
       '<div style="min-width:0"><div class="zname">' + escapeHtml(cam.name) +
       (cam.test ? ' <span class="badge amber">TEST</span>' : '') +
       (cam.enabled === false ? ' <span class="badge red">đang tắt</span>' : '') + '</div>' +
-      '<div class="zmeta mono">' + escapeHtml(cam.id) + ' · ' + escapeHtml(cam.source) +
-      ' · ' + escapeHtml(capture.source || '') +
-      (capture.error ? ' · ⚠ ' + escapeHtml(capture.error) : '') + '</div></div>' +
+      '<div class="zmeta mono">' + detail + '</div>' + hintLine + checkLine + '</div>' +
       '<div class="zright">' +
+      '<button class="btn small" data-cam-check="' + escapeHtml(cam.id) +
+        '" title="Thử phân giải tên miền, mở cổng và hỏi RTSP xem camera có trả lời không">' +
+        '🔌 Kiểm tra</button>' +
       '<label class="switch" title="Bật/tắt camera này"><input type="checkbox" data-cam-enabled="' +
       escapeHtml(cam.id) + '"' + (cam.enabled === false ? '' : ' checked') +
       '><span class="track"></span></label>' +
@@ -712,7 +761,7 @@ function renderSettingsCameras() {
       '<button class="btn small danger" data-cam-delete="' + escapeHtml(cam.id) + '">Xoá</button>' +
       '<button class="btn small ghost" data-cam-watch="' + escapeHtml(cam.id) + '">Xem</button>' +
       '</div></div>';
-  }).join('');
+  }).join(''));
 }
 
 function renderSettings() {
@@ -803,7 +852,24 @@ async function loadWebcams() {
       : '<option value="">Không thấy webcam</option>';
     const p = platformInfo();
     const permBox = $('#webcam-permission-box');
-    if (permBox && p.webcam_hint) permBox.textContent = p.webcam_hint;
+    if (permBox) {
+      // Trước đây hộp này luôn in hướng dẫn "hãy cấp quyền" kể cả khi đã cấp
+      // quyền → người dùng tưởng app hỏng. Nay nói rõ TRẠNG THÁI thật.
+      const state = p.webcam_permission || 'unknown';
+      const label = {
+        authorized: '✅ Đã cấp quyền camera cho ứng dụng này.',
+        denied: '⛔ macOS/Windows đang CHẶN quyền camera của ứng dụng.',
+        restricted: '⛔ Hệ điều hành giới hạn quyền camera (restricted).',
+        not_determined: 'ℹ️ Chưa hỏi quyền camera lần nào — app sẽ hỏi khi mở webcam.',
+        not_required: 'ℹ️ Hệ điều hành này không cần cấp quyền riêng cho webcam.',
+      }[state] || 'ℹ️ Chưa rõ trạng thái quyền camera.';
+      // Khi quyền ĐÃ cấp thì không in lại hướng dẫn "hãy cấp quyền" (vô lý).
+      const granted = state === 'authorized' || state === 'not_required';
+      permBox.textContent = granted
+        ? label + ' Nếu hình vẫn đen: đóng ứng dụng khác đang dùng webcam rồi bấm “Kết nối lại”.'
+        : label + ' ' + (p.webcam_hint || '');
+      permBox.classList.toggle('ok', granted);
+    }
     $('#testcam-info').textContent = list.length
       ? 'Tìm thấy ' + list.length + ' webcam trên ' + (p.label || 'máy này') +
         '. Camera test mở khi có người xem, tắt khi không dùng (đèn webcam tắt).'
@@ -3175,7 +3241,22 @@ function wireSettings() {
     const promote = event.target.closest('[data-cam-promote]');
     const remove = event.target.closest('[data-cam-delete]');
     const watch = event.target.closest('[data-cam-watch]');
+    const check = event.target.closest('[data-cam-check]');
     try {
+      if (check) {
+        const cameraId = check.dataset.camCheck;
+        S.camChecks[cameraId] = { pending: true };
+        renderSettingsCameras();
+        try {
+          S.camChecks[cameraId] = await api(
+            '/api/cameras/' + encodeURIComponent(cameraId) + '/test-connection',
+            { method: 'POST' });
+        } catch (error) {
+          S.camChecks[cameraId] = { ok: false, message: error.message };
+        }
+        renderSettingsCameras();
+        return;
+      }
       if (promote) {
         await api('/api/test-camera/' + encodeURIComponent(promote.dataset.camPromote) + '/promote', { method: 'POST' });
         toast('Đã chuyển thành camera thật', 'ok');
@@ -3248,6 +3329,7 @@ function wireWizard() {
 }
 
 async function boot() {
+  installPointerGuard();
   wireTabs();
   wireHeader();
   wireLive();
@@ -3278,5 +3360,15 @@ async function boot() {
 
   setInterval(() => { if (!S.state) return; }, 5000);
 }
+
+/* Cầu nối nhỏ để gỡ lỗi trong Console trình duyệt và để test tự động kiểm tra
+ * được "panel có bị dựng lại không" — không ảnh hưởng chức năng của app. */
+window.__VO__ = {
+  get state() { return S.state; },
+  get config() { return S.config; },
+  get tab() { return S.tab; },
+  renderAll,
+  setState(next) { S.state = next; renderAll(); },
+};
 
 document.addEventListener('DOMContentLoaded', boot);

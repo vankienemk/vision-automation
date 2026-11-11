@@ -139,6 +139,46 @@ async def test_index_and_state(tmp_path, image_path):
 
 
 @pytest.mark.asyncio
+async def test_camera_test_connection_endpoint(tmp_path, image_path, monkeypatch):
+    """Nút 🔌 Kiểm tra phải trả lời được kể cả khi mạng hỏng (không ném 500)."""
+    from app.netcheck import ConnectionCheck
+
+    runtime = build_runtime(tmp_path, image_path)
+    runtime.start()
+    try:
+        async with client_for(runtime) as client:
+            calls: list[str] = []
+
+            def fake_check(camera_id: str) -> dict:
+                calls.append(camera_id)
+                if camera_id != "cam_test":
+                    from app.config import ConfigError
+
+                    raise ConfigError(f"Không có camera '{camera_id}'.")
+                return ConnectionCheck(
+                    ok=False,
+                    stage="tcp",
+                    message=f"Không tới được camera {camera_id}",
+                    hint="Kiểm tra tường lửa",
+                    elapsed_ms=12,
+                ).as_dict() | {"camera_id": camera_id}
+
+            monkeypatch.setattr(runtime, "check_camera", fake_check)
+            resp = await client.post("/api/cameras/cam_test/test-connection")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["ok"] is False
+            assert body["stage"] == "tcp"
+            assert "tường lửa" in body["hint"]
+            assert calls == ["cam_test"]
+
+            missing = await client.post("/api/cameras/khong_co/test-connection")
+            assert missing.status_code == 404
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_index_html_carries_cache_buster_and_zone_controls(tmp_path, image_path):
     """A stale app.js in the browser cache makes fixed bugs look alive."""
     runtime = build_runtime(tmp_path, image_path)

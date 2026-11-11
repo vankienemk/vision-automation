@@ -57,6 +57,7 @@ from .config import (
 )
 from .detection import Detection, shift_detection
 from .detector import Detector, build_detector
+from .netcheck import check_camera_source
 from . import platform_compat as compat
 from .mqtt_client import MqttPublisher, render_payload
 from .scenarios import CommandRequest, ScaledClock, ScenarioEngine
@@ -1803,6 +1804,26 @@ class Runtime:
     def set_simulation_scale(self, scale: float) -> dict:
         result = self.simulator.set_scale(scale)
         self.events.add("info", f"Mô phỏng: tốc độ thời gian x{result['scale']:.0f}")
+        return result
+
+    def check_camera(self, camera_id: str) -> dict:
+        """Kiểm tra "camera này có tới được không" và trả lời bằng tiếng Việt.
+
+        Chạy trong thread của endpoint (route khai báo ``def``) nên không chặn
+        vòng lặp sự kiện, kể cả khi mạng phải chờ hết timeout.
+        """
+        camera = self.config.camera(camera_id)
+        if camera is None:
+            raise ConfigError(f"Không có camera '{camera_id}'.")
+        result = check_camera_source(camera).as_dict()
+        result["camera_id"] = camera_id
+        self.events.add(
+            "camera",
+            f"Kiểm tra kết nối {camera_id}: {result['message']}",
+            level="info" if result["ok"] else "error",
+            camera_id=camera_id,
+            stage=result["stage"],
+        )
         return result
 
     def test_mqtt(self) -> dict:

@@ -41,6 +41,7 @@ Thiết kế cho chạy **24/7** trên mini-PC / NAS / Raspberry Pi 5 / PC, **ư
 16. [Xử lý sự cố](#16-xử-lý-sự-cố)
 17. [Kiểm thử](#17-kiểm-thử)
 18. [Kiến trúc mã nguồn](#18-kiến-trúc-mã-nguồn)
+    - [18.1 Vòng sửa “nút Cài đặt không ăn” + “RTSP không kết nối”](#181-vòng-sửa-nút-trong-cài-đặt-không-ăn--rtsp-không-kết-nối-đo-thật)
 
 ---
 
@@ -695,7 +696,9 @@ mosquitto_pub -h 192.168.1.10 -t zigbee2mqtt/den_bep/set -m '{"state":"ON"}'
 
 | Hiện tượng | Nguyên nhân & cách sửa |
 |---|---|
-| `Không kết nối được RTSP: sai mật khẩu/URL?` | Sai URL/mật khẩu, sai IP, camera chặn IP. Kiểm tra bằng VLC. **Thử đổi transport sang UDP.** |
+| `Không kết nối được RTSP: sai mật khẩu/URL?` | Sai URL/mật khẩu, sai IP, camera chặn IP. Bấm **🔌 Kiểm tra** cạnh camera trong tab **Cài đặt** — app tự phân biệt: *không phân giải được tên miền* / *không tới được IP: cổng* / *cổng mở nhưng không phải RTSP* / *401 sai mật khẩu* / *404 sai đường dẫn luồng*, kèm cách sửa. Kiểm tra thêm bằng VLC. **Thử đổi transport sang UDP.** |
+| Nguồn RTSP **đã bật lại** mà app vẫn không kết nối | Bấm **🔌 Kiểm tra**: nếu báo *“Không tới được `<ip>:<cổng>` sau 4 giây”* thì lỗi **không nằm ở app** — máy phát không mở cổng đó ra mạng. Kiểm tra trên **máy phát**: (1) dịch vụ RTSP đang chạy và **listen trên 0.0.0.0** chứ không phải `127.0.0.1` — Windows: `netstat -ano \| findstr 8554`, macOS/Linux: `lsof -iTCP:8554 -sTCP:LISTEN`; (2) mở cổng trong tường lửa (Windows: `New-NetFirewallRule -DisplayName RTSP -Direction Inbound -LocalPort 8554 -Protocol TCP -Action Allow`); (3) hai máy **cùng một mạng LAN** (mạng khách / bật “client isolation” thì máy này không thấy máy kia dù ping được); (4) app phát là app trên điện thoại thì phải để màn hình sáng. Thử mở bằng VLC trên **cùng máy này**: Media → Open Network Stream. |
+| Nút / công tắc trong tab **Cài đặt** bấm không ăn | Đã sửa ở bản này: trước đây danh sách camera bị dựng lại ~8 lần/giây (theo nhịp WebSocket) nên `mousedown` và `mouseup` rơi vào 2 phần tử khác nhau → trình duyệt không phát sinh sự kiện `click`. Nay panel chỉ vẽ lại khi dữ liệu **thật sự đổi** và **không** vẽ lại khi đang giữ chuột. Nếu vẫn gặp: **Ctrl/Cmd+Shift+R** để bỏ `app.js` cũ trong cache. |
 | Hình đứng, không cập nhật | Luồng treo — app tự kết nối lại sau `stale_after_s`. Nếu lặp lại, giảm `imgsz`, hoặc chuyển camera sang sub-stream. Xem [§16.1](#161-hình-bị-trễ-hoặc-treo-liên-tục-rtsp). |
 | `Trễ hình` báo ≥ 1 giây, hình “đi sau” thực tế | Đường truyền đang đệm khung (GOP dài, mạng chậm, CPU đuối). Xem [§16.1](#161-hình-bị-trễ-hoặc-treo-liên-tục-rtsp). |
 | `FPS suy luận 0.0` + vùng ghi `Đang xác định…` | Camera mới thêm từ UI chưa có luồng suy luận (lỗi cũ đã sửa ở bản này). Kiểm tra log có `Luồng suy luận <id> bắt đầu`; nếu thiếu, tắt rồi bật lại camera trong tab **Cài đặt**, hoặc khởi động lại app. |
@@ -797,7 +800,7 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**244 test**) phủ:
+Bộ test (**269 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
 - **`tests/test_zones.py`** — hình học đa giác, **5 chế độ xác định trong vùng**
@@ -849,7 +852,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 244 test (pytest + Playwright UI), gồm test_platform.py
+├── tests/                  # 269 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
@@ -888,13 +891,26 @@ OpenCV/MQTT**, nên test được với **đồng hồ giả** và chạy nhanh.
 
 ---
 
+## 18.1 Vòng sửa “nút trong Cài đặt không ăn” + “RTSP không kết nối” (đo thật)
+
+| Kiểm tra | Kết quả đo |
+|---|---|
+| Nguyên nhân nút bấm “không ăn” | `MutationObserver` trên `#settings-cameras` đếm **7 lần dựng lại/giây** (do WebSocket đẩy trạng thái 8 Hz). Click chuột **giữ 250 ms** vào công tắc → **không có** sự kiện `click` (mousedown và mouseup rơi vào 2 node khác nhau) |
+| Sau khi sửa (`setHtml` + chốt con trỏ) | **0 mutation/giây** khi dữ liệu không đổi; cùng cú click giữ 250 ms → `POST /api/cameras/cam_test_laptop/enabled` → toast *“Đã tắt cam_test_laptop”* |
+| Test hồi quy | `tests/test_zone_editor_ui.py`: `test_settings_panel_is_not_rebuilt_when_nothing_changes`, `test_real_click_on_camera_switch_lands_while_state_updates` (giả lập trạng thái đẩy 30 ms/lần) |
+| `POST /api/cameras/<id>/test-connection` (RTSP hỏng thật) | trả sau **4.0 s**: `{ok:false, stage:"tcp", message:"Không tới được 192.168.200.141:8554 sau 4 giây.", hint:"…(1) máy phát TẮT RTSP; (2) khác mạng; (3) tường lửa chặn cổng 8554… thử VLC", detail:"IP phân giải được: 192.168.200.141"}` |
+| Cùng endpoint với webcam | `{ok:true, stage:"ok", message:"Thấy webcam: FaceTime HD Camera."}` |
+| Chẩn đoán mạng độc lập (máy này) | ping `192.168.200.141` **có trả lời** (97–116 ms, ARP có MAC), nhưng **0/33 cổng mở** (554, 8554, 1935, 8080, 445, 3389, …) → kết luận: dịch vụ RTSP không listen ra mạng, **không phải lỗi app**; đối chứng `test.mosquitto.org:1883` và LAN `192.168.200.159:8080` đều kết nối được |
+| Hộp quyền camera | trước: luôn in “macOS chưa cho phép…” dù đã cấp quyền; nay **“✅ Đã cấp quyền camera cho ứng dụng này.”** (nền xanh), chỉ hiện hướng dẫn cấp quyền khi thật sự bị chặn |
+| Thẻ camera trong Cài đặt | hiện thêm dòng 💡 **gợi ý sửa** (`capture.hint`) và nút **🔌 Kiểm tra** với kết quả chi tiết ngay dưới tên camera |
+
 ## 19. Những gì đã chạy thật trên máy Apple Silicon (M1)
 
 Bảng dưới là kết quả đo được khi phát triển, không phải suy đoán:
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest` | **231/231 pass** (~30 s) |
+| `pytest` | **269/269 pass** (~33 s) |
 | RTSP thật `rtsp://192.168.1.50:554/live.sdp` (640×480, nguồn 10 fps) | chạy **> 6 phút liên tục**: `capture_fps 10.0`, `read_ms 110`, **`frame_age_ms 30`** (trước khi sửa: trễ ~3 s, hễ ~20 s lại `Luồng treo quá 10s`), **0** lần treo trong log, `FPS suy luận 4.0` |
 | Sự cố “treo liên tục + trễ 3 s” | hai lỗi gốc: (1) `_on_config_change` ném `IndexError` tại `running = {name.split("-", 1)[1] …}` nên **không bao giờ tạo luồng suy luận** cho camera thêm từ UI; (2) đọc RTSP bị **giới hạn tốc độ theo `fps`** nên khung dư dồn mãi → trễ dần rồi đứng. Đã sửa + thêm 6 test hồi quy |
 | Hot-reload bật/tắt camera đang chạy | `{"value": false}` → `Dừng luồng suy luận live_sdp`; `{"value": true}` → `Luồng suy luận live_sdp bắt đầu`; **không** còn `IndexError` |

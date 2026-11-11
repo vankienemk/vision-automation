@@ -251,6 +251,7 @@ class _Handler(BaseHTTPRequestHandler):
     """Phục vụ file tĩnh thật + API giả. Ghi lại các lần POST /zones."""
 
     saved_zones: list = []  # noqa: RUF012 - class-level recorder
+    posts: list = []        # noqa: RUF012 - mọi POST (dùng cho test nút bấm)
     server_version = "ZoneUITest/1.0"
 
     def log_message(self, *args) -> None:  # noqa: A002 - giữ im lặng log của server
@@ -295,6 +296,7 @@ class _Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else b"{}"
         path = self.path.split("?", 1)[0]
+        type(self).posts.append(path)
         if path.startswith("/api/cameras/") and path.endswith("/zones"):
             data = json.loads(body or b"{}")
             type(self).saved_zones.append(data)
@@ -679,3 +681,73 @@ def test_zone_editor_explains_why_a_zone_is_empty(open_zone_tab):
     assert "NGOÀI vùng" in text
     live = page.eval_on_selector("#live-zones", "el => el.textContent")
     assert "ngoài vùng" in live
+
+
+# --------------------------------------------------------------------------- #
+# 13. Nút/switch trong tab Cài đặt phải bấm ăn (lỗi: dựng lại DOM 8 lần/giây
+#     làm mousedown và mouseup rơi vào 2 node khác nhau → không có sự kiện click)
+# --------------------------------------------------------------------------- #
+def _open_settings(browser, ui_base_url):
+    context = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = context.new_page()
+    page.goto(ui_base_url + "/", wait_until="domcontentloaded")
+    page.wait_for_function("() => window.__VO__ && window.__VO__.state", timeout=10000)
+    page.click("button[data-tab='settings']")
+    # input thật bị CSS ẩn (chỉ hiện .track) nên chờ ở trạng thái "attached"
+    page.wait_for_selector("[data-cam-enabled]", state="attached", timeout=5000)
+    page.wait_for_timeout(300)
+    return page
+
+
+def test_settings_panel_is_not_rebuilt_when_nothing_changes(browser, ui_base_url):
+    page = _open_settings(browser, ui_base_url)
+    try:
+        # Đánh dấu node hiện tại; nếu panel bị dựng lại, dấu sẽ biến mất.
+        page.eval_on_selector("[data-cam-enabled]", "el => { el.__mark = 'giữ-nguyên'; }")
+        page.evaluate("() => { for (let i = 0; i < 8; i += 1) window.__VO__.renderAll(); }")
+        marks = page.eval_on_selector_all(
+            "[data-cam-enabled]", "els => els.map(el => el.__mark || null)"
+        )
+        assert marks and all(m == "giữ-nguyên" for m in marks), \
+            f"panel Cài đặt bị dựng lại dù dữ liệu không đổi: {marks}"
+    finally:
+        page.context.close()
+
+
+def test_real_click_on_camera_switch_lands_while_state_updates(browser, ui_base_url):
+    _Handler.posts.clear()
+    page = _open_settings(browser, ui_base_url)
+    try:
+        # Giả lập trạng thái đẩy về liên tục như WebSocket thật (8 Hz, ở đây 30 ms).
+        page.evaluate(
+            "() => { window.__t = setInterval(() => window.__VO__.renderAll(), 30); }"
+        )
+        box = page.eval_on_selector(
+            "[data-cam-enabled='cam_test']",
+            "el => { const r = el.closest('label.switch').getBoundingClientRect();"
+            " return {x: r.x + r.width / 2, y: r.y + r.height / 2}; }",
+        )
+        page.mouse.move(box["x"], box["y"])
+        page.mouse.down()
+        page.wait_for_timeout(200)      # giữ chuột như người thật
+        page.mouse.up()
+        page.wait_for_timeout(600)
+        page.evaluate("() => clearInterval(window.__t)")
+        assert any(p.endswith("/cam_test/enabled") for p in _Handler.posts), \
+            f"bấm công tắc camera không gửi được yêu cầu nào: {_Handler.posts}"
+    finally:
+        page.context.close()
+
+
+def test_camera_card_shows_fix_hint_and_connection_check_button(browser, ui_base_url):
+    page = _open_settings(browser, ui_base_url)
+    try:
+        assert page.eval_on_selector_all("[data-cam-check]", "els => els.length") >= 1
+        # Bấm "Kiểm tra" → phải gọi endpoint và hiện kết quả
+        if not page.eval_on_selector_all("#settings-cameras .zmeta.fix", "els => els.length"):
+            page.click("[data-cam-check]")
+            page.wait_for_timeout(500)
+        text = page.eval_on_selector("#settings-cameras", "el => el.textContent")
+        assert "Kiểm tra" in text
+    finally:
+        page.context.close()

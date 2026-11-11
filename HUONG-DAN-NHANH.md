@@ -243,6 +243,8 @@ Trước khi chạy thật, kiểm tra 5 điều:
 | Hình **đen thui**, không có ảnh | macOS chưa cấp quyền Camera | System Settings → Privacy & Security → **Camera** → bật cho **Terminal** → tắt app, mở lại |
 | Báo "đang được dùng bởi ứng dụng khác" (device busy) | Zoom/Meet/FaceTime đang mở camera | Thoát ứng dụng đó rồi bấm **↻ Kết nối lại** |
 | "Không kết nối được RTSP: sai mật khẩu?..." | Sai URL/mật khẩu, hoặc camera chặn TCP | Đổi Transport `tcp`→`udp`; thử URL bằng VLC |
+| Camera RTSP **đã bật lại mà vẫn không lên hình** | Thường **không phải lỗi app**: máy phát không mở cổng ra mạng | Tab **⚙️ Cài đặt** → bấm **🔌 Kiểm tra** ở dòng camera đó. Nếu báo *"Không tới được `<ip>:<cổng>`"*: trên **máy phát** kiểm tra dịch vụ đang chạy + `netstat -ano \| findstr 8554`, mở cổng trong tường lửa, và hai máy phải **cùng một mạng LAN** |
+| Bấm nút / công tắc trong **Cài đặt** mà không có phản ứng | (đã sửa) trình duyệt giữ `app.js` cũ, hoặc panel bị vẽ lại đúng lúc đang bấm | Nhấn **Ctrl/Cmd + Shift + R** để tải lại giao diện mới |
 | Chấm **MQTT đỏ** | Broker chưa chạy / sai host / sai mật khẩu | Thẻ **🔌 MQTT** → **Kiểm tra kết nối**; đọc thông báo lỗi tiếng Việt hiện ra |
 | Đèn **nhấp nháy** liên tục | Nhận diện chập chờn | Tăng **K-of-N** = 3/5, **exit grace** = 4–5 giây, tăng **độ tin cậy** lên 0.5–0.6 |
 | Đèn **bật rồi không tắt** | Kịch bản chưa có bước "tắt khi vắng" | Thẻ **⚙️ Kịch bản** → chọn kịch bản → thêm bước vào nhánh **Vắng người** |

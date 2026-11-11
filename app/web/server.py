@@ -517,6 +517,19 @@ def create_app(runtime: Runtime) -> FastAPI:
         payload = await request.json()
         return JSONResponse(runtime.set_camera_enabled(camera_id, bool(payload.get("value", True))))
 
+    @app.post("/api/cameras/{camera_id}/test-connection")
+    def test_camera_connection(camera_id: str) -> JSONResponse:
+        """Kiểm tra camera có tới được không (DNS → TCP → RTSP).
+
+        Route khai báo ``def`` (không phải ``async def``) để Starlette chạy nó
+        trong threadpool: phép thử có thể chờ tới ~4 giây, không được chặn vòng
+        lặp sự kiện của web server.
+        """
+        try:
+            return JSONResponse(runtime.check_camera(camera_id))
+        except ConfigError as exc:
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=404)
+
     @app.post("/api/test-camera/{camera_id}/promote")
     async def promote_test_camera(camera_id: str) -> JSONResponse:
         return JSONResponse(runtime.promote_test_camera(camera_id))
