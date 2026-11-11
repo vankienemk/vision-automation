@@ -156,19 +156,41 @@ class ScheduleConfig(_Base):
                 raise ValueError("active_schedule.days chỉ nhận 0..6 (0=Thứ 2, 6=Chủ nhật).")
         return cleaned
 
+    @model_validator(mode="after")
+    def _reject_equal_bounds(self) -> "ScheduleConfig":
+        if time_to_minutes(self.from_time) == time_to_minutes(self.to_time):
+            raise ValueError(
+                f"active_schedule: 'from' và 'to' đang bằng nhau ({self.from_time}). "
+                "Trước đây trường hợp này bị hiểu là 'cả ngày' nên đèn có thể bật 24/7 ngoài ý muốn. "
+                "Hãy đặt khung giờ rõ ràng, ví dụ from: '06:00' to: '23:00'; "
+                "muốn chạy cả ngày thì xoá hẳn khối active_schedule."
+            )
+        return self
+
     def is_active(self, hour: int, minute: int, weekday: int) -> bool:
-        """``weekday`` follows ``datetime.weekday()`` (0=Monday)."""
-        if self.days is not None and weekday not in self.days:
-            return False
+        """``weekday`` follows ``datetime.weekday()`` (0=Monday).
+
+        Khung qua đêm (``from`` > ``to``) thuộc về **ngày bắt đầu**: khung
+        22:00→06:00 với ``days: [0]`` (Thứ 2) bao gồm cả 01:00 Thứ 3, vì đó là
+        đuôi của "đêm Thứ 2". Trước đây ``days`` được so với thứ HIỆN TẠI nên
+        phần sau nửa đêm bị mất.
+        """
         start = time_to_minutes(self.from_time)
         end = time_to_minutes(self.to_time)
         now = hour * 60 + minute
-        if start == end:
-            return True
-        if start < end:
-            return start <= now <= end
-        # crosses midnight
-        return now >= start or now <= end
+        if start == end:  # bị validator chặn; giữ nhánh phòng thủ = "cả ngày"
+            active, owning_day = True, weekday
+        elif start < end:
+            active, owning_day = start <= now <= end, weekday
+        elif now >= start:
+            active, owning_day = True, weekday
+        elif now <= end:
+            active, owning_day = True, (weekday - 1) % 7
+        else:
+            active, owning_day = False, weekday
+        if not active:
+            return False
+        return self.days is None or owning_day in self.days
 
 
 class PublishAction(_Base):
@@ -300,13 +322,34 @@ class ZoneConfig(_Base):
                     f"zone.polygon[{index}] = [{x}, {y}] nằm ngoài 0..1. "
                     "Toạ độ zone phải được chuẩn hoá (0..1) theo chiều rộng/cao khung hình."
                 )
-            if points and abs(points[-1][0] - x) < 1e-9 and abs(points[-1][1] - y) < 1e-9:
-                continue  # drop duplicated consecutive vertices
+            # Bấm đúp / rung tay sinh ra 2 điểm cách nhau < 0.2% khung hình — coi
+            # là điểm trùng và tự bỏ, thay vì để lại đa giác "vô nghĩa".
+            if points:
+                last_x, last_y = points[-1]
+                if abs(last_x - x) < 2e-3 and abs(last_y - y) < 2e-3:
+                    continue
             points.append((round(x, 6), round(y, 6)))
-        if len(points) > 2 and points[0] == points[-1]:
+        while len(points) > 2:
+            first_x, first_y = points[0]
+            last_x, last_y = points[-1]
+            if abs(first_x - last_x) >= 2e-3 or abs(first_y - last_y) >= 2e-3:
+                break
             points.pop()
         if len(points) < 3:
-            raise ValueError("zone cần ít nhất 3 đỉnh (polygon).")
+            raise ValueError(
+                "zone cần ít nhất 3 đỉnh KHÁC NHAU (polygon). Điểm trùng nhau đã được tự bỏ — "
+                "hãy vẽ lại vùng với các điểm cách xa nhau hơn."
+            )
+        area = 0.0
+        for index in range(len(points)):
+            x1, y1 = points[index]
+            x2, y2 = points[(index + 1) % len(points)]
+            area += x1 * y2 - x2 * y1
+        if abs(area) / 2.0 < 1e-4:
+            raise ValueError(
+                "Vùng có diện tích gần bằng 0 (các điểm gần như thẳng hàng) nên không thể "
+                "xác định 'trong vùng'. Hãy vẽ rộng ra hoặc dùng kiểu 'Toàn khung hình'."
+            )
         return points
 
     @field_validator("classes")
@@ -441,6 +484,14 @@ class MqttConfig(_Base):
     ca_certs: str | None = None
     dry_run: bool = False
     queue_max: int = Field(default=50, ge=1, le=1000)
+    queue_ttl_s: float = Field(
+        default=900.0,
+        ge=0.0,
+        description=(
+            "Lệnh chờ cũ hơn số giây này sẽ bị BỎ khi nối lại broker (0 = không giới hạn). "
+            "Phát lại lệnh quá cũ rất nguy hiểm: trạng thái lúc xếp hàng có thể không còn đúng."
+        ),
+    )
     reconnect_min_s: float = Field(default=1.0, ge=0.2, le=60)
     reconnect_max_s: float = Field(default=30.0, ge=1, le=600)
     publish_zone_state: bool = True
@@ -580,6 +631,51 @@ class AppConfig(_Base):
             # warn-only: class names are validated at runtime against the model
             _ = (camera, zone)
         return self
+
+    # -- cross-checks ------------------------------------------------------ #
+    def action_topics(self) -> set[str]:
+        """Mọi topic mà một kịch bản có thể publish tới."""
+        topics: set[str] = set()
+        for scenario in self.scenarios:
+            for trigger in scenario.all_triggers():
+                for step in trigger.steps:
+                    if step.publish is not None and step.publish.topic:
+                        topics.add(step.publish.topic)
+        return topics
+
+    def topic_warnings(self) -> list[str]:
+        """Cảnh báo (KHÔNG chặn) về cấu hình topic nguy hiểm.
+
+        Nguy hiểm nhất: ``state_topic`` của một vùng TRÙNG topic lệnh. Khi đó bản
+        tin retained ``{"occupied": ...}`` sẽ đè lên topic điều khiển đèn — thiết
+        bị nhận rác. Không chặn hẳn để không làm hỏng cấu hình đang chạy, nhưng
+        phải hiện rõ trên UI và trong log.
+        """
+        warnings: list[str] = []
+        action_topics = self.action_topics()
+        for camera in self.cameras:
+            for zone in camera.zones:
+                if not zone.state_topic:
+                    continue
+                if zone.state_topic in action_topics:
+                    warnings.append(
+                        f"Vùng '{camera.id}/{zone.id}': state_topic '{zone.state_topic}' TRÙNG topic lệnh — "
+                        "bản tin retained trạng thái vùng sẽ đè lên lệnh điều khiển thiết bị. "
+                        "Hãy đổi state_topic sang nhánh khác (vd vision/<camera>/<zone>/state)."
+                    )
+                if zone.state_topic.endswith("/set") or zone.state_topic.endswith("/command"):
+                    warnings.append(
+                        f"Vùng '{camera.id}/{zone.id}': state_topic '{zone.state_topic}' trông giống topic LỆNH "
+                        "(kết thúc bằng /set hoặc /command) — nên dùng nhánh trạng thái riêng."
+                    )
+        for scenario in self.scenarios:
+            overrides = scenario.manual_override
+            if overrides and overrides.state_topic in action_topics:
+                warnings.append(
+                    f"Kịch bản '{scenario.name}': manual_override.state_topic trùng topic lệnh — "
+                    "app sẽ tự tạm dừng vì chính lệnh của nó."
+                )
+        return warnings
 
     # -- lookups ---------------------------------------------------------- #
     def camera(self, camera_id: str) -> CameraConfig | None:

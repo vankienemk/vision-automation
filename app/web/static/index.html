@@ -86,6 +86,15 @@
       <h2>Trạng thái vùng <span class="hint">xanh = có người, xám = trống</span></h2>
       <div id="live-zones" class="zone-list"></div>
     </div>
+
+    <details class="card" id="diag-card" open>
+      <summary><h2 style="display:inline">Bảng chẩn đoán <span class="hint">số liệu thật để biết hệ thống đang khoẻ hay không</span></h2></summary>
+      <div id="diag-warnings" class="diag-warnings"></div>
+      <div id="diag-summary" class="diag-summary"></div>
+      <div id="diag-cameras" class="diag-cameras"></div>
+      <h3 class="diag-title">Giải thích quyết định gần nhất</h3>
+      <div id="diag-decisions" class="diag-decisions"></div>
+    </details>
   </section>
 
   <!-- ============================== ZONES ============================== -->
@@ -113,6 +122,9 @@
         <button class="btn small" id="zone-new">＋ Vùng mới</button>
         <button class="btn small danger" id="zone-delete">🗑 Xoá vùng</button>
         <div class="spacer"></div>
+        <button class="btn small" id="zone-freeze" title="Chụp khung hình hiện tại để vẽ trên ảnh tĩnh">📷 Chụp lại</button>
+        <button class="btn small" id="zone-live" title="Xem luồng trực tiếp (hình động)">▶ Trực tiếp</button>
+        <span class="freeze-state" id="zone-freeze-state">⏸ ảnh tĩnh</span>
         <button class="btn small primary" id="zone-save">💾 Lưu vùng</button>
       </div>
 
@@ -126,6 +138,11 @@
         <canvas id="zone-canvas"></canvas>
         <div class="zone-tip" id="zone-tip"></div>
       </div>
+
+      <p class="vertex-hint small muted" id="zone-freeze-note">
+        Vẽ trên <b>ảnh tĩnh</b> để canh điểm cho chắc — bấm <b>📷 Chụp lại</b> khi cần khung hình mới,
+        <b>▶ Trực tiếp</b> để xem luồng thật. Ảnh tĩnh cũng giúp webcam nhả máy (đèn tắt) khi không cần.
+      </p>
 
       <p class="vertex-hint" id="zone-hint">
         <b>Công cụ: Đa giác</b> — bấm từng điểm trên ảnh, bấm đúp (hoặc “✔ Hoàn tất vùng”) để đóng vùng.

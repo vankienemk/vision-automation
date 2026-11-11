@@ -382,3 +382,41 @@ hr.sep { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
   .dots { gap: 10px; }
   .live-wrap { aspect-ratio: 4 / 3; }
 }
+
+/* Nút “Lưu vùng” nhấp nháy nhẹ khi có thay đổi chưa lưu */
+button.btn.attention {
+  border-color: var(--amber);
+  color: #fde68a;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.25);
+}
+#tabs button.dirty { color: var(--amber); }
+.freeze-state {
+  font-size: 11.5px; padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--muted); background: var(--panel-2);
+}
+.freeze-state.live { color: #86efac; border-color: #166534; background: #052e16; }
+
+/* ---------- bảng chẩn đoán ---------- */
+#diag-card summary { cursor: pointer; }
+.diag-summary { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 8px 0; font-size: 12.5px; }
+.diag-line b { color: #e2e8f0; }
+.diag-warnings { display: none; }
+.diag-warnings.show { display: block; margin-bottom: 8px; }
+.diag-cameras { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
+.diag-cam { border: 1px solid var(--line); border-radius: 10px; padding: 10px; background: var(--panel-2); }
+.diag-cam.bad { border-color: #991b1b; }
+.diag-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.diag-grid { display: grid; grid-template-columns: 1fr auto; gap: 3px 10px; font-size: 12px; }
+.diag-grid span { color: var(--muted); }
+.diag-grid b.ok { color: #86efac; }
+.diag-grid b.warn { color: var(--amber); }
+.diag-grid b.bad { color: #fca5a5; }
+.diag-err { margin-top: 6px; font-size: 12px; color: #fca5a5; }
+.diag-zones { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.diag-row { display: flex; align-items: center; gap: 8px; font-size: 12px; flex-wrap: wrap; }
+.diag-title { margin: 14px 0 6px; font-size: 13px; color: var(--muted); }
+.diag-decisions { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow: auto; }
+.diag-decision { display: flex; gap: 8px; font-size: 12px; border-bottom: 1px dashed var(--line); padding-bottom: 3px; }
+.diag-decision .mono { color: var(--muted); flex: none; }
+.diag-decision .ok { color: #bbf7d0; }
+.sc-card .why { margin-top: 6px; font-size: 12px; color: #cbd5e1; background: #0b1526; border-left: 3px solid #1d4ed8; padding: 4px 8px; border-radius: 4px; }

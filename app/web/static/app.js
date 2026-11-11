@@ -120,19 +120,50 @@ const ZE = {
   history: [],
   future: [],
   dirty: false,
+  frozen: false,          // true = đang vẽ trên ẢNH TĨNH (đóng băng khung hình)
+  frozenSrc: null,        // data URL của khung hình đã chụp
 };
 
 /* ------------------------------------------------------------------- tabs */
+/* Có thay đổi vùng chưa lưu thì PHẢI hỏi trước khi ghi đè — trước đây đổi tab
+ * hoặc đổi camera là mất sạch công sức kéo/thả mà không một lời cảnh báo. */
+function confirmDiscardZones(reason) {
+  if (!ZE.dirty) return true;
+  const answer = window.confirm(
+    'Bạn có thay đổi vùng CHƯA LƯU (' + reason + ').\n\n'
+    + 'Bấm OK để BỎ các thay đổi đó.\n'
+    + 'Bấm Cancel để ở lại tab “Vùng phát hiện” và bấm “💾 Lưu vùng” trước.'
+  );
+  if (answer) ZE.dirty = false;
+  return answer;
+}
+
+let _dirtyShown = null;
+function updateDirtyBadge() {
+  if (_dirtyShown === ZE.dirty) return;   // chống ghi DOM mỗi khung hình
+  _dirtyShown = ZE.dirty;
+  const tab = document.querySelector('#tabs button[data-tab="zones"]');
+  if (tab) {
+    tab.classList.toggle('dirty', !!ZE.dirty);
+    tab.textContent = (ZE.dirty ? '• ' : '') + 'Vùng phát hiện';
+  }
+  const save = $('#zone-save');
+  if (save) save.classList.toggle('attention', !!ZE.dirty);
+}
+
 function switchTab(name) {
+  if (S.tab === name) return;
+  if (S.tab === 'zones' && !confirmDiscardZones('bạn đang chuyển sang tab khác')) return;
   S.tab = name;
   $$('#tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
   $$('.panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + name));
-  if (name === 'zones') { loadZoneEditor(); }
+  if (name === 'zones') { loadZoneEditor().then(autoFreezeWhenReady); }
   if (name === 'scenarios') { renderScenarioPanel(); }
   if (name === 'settings') { renderSettings(); loadWebcams(); }
   if (name === 'mqtt') { loadMonitor(); }
   if (name === 'logs') { renderLogs(); }
   if (name === 'simulate') { renderSimulator(); }
+  updateDirtyBadge();
 }
 
 /* ------------------------------------------------------------ websocket */
@@ -187,6 +218,94 @@ function renderAll() {
   if (S.tab === 'zones') renderZoneSidebar();
   if (S.tab === 'mqtt') renderMqttStatus();
   if (S.tab === 'settings') renderSettingsCameras();
+  renderDiagnostics();
+}
+
+/* =========================== CHẨN ĐOÁN ================================ */
+/* Một chỗ duy nhất trả lời "hệ thống đang khoẻ hay không": khung hình cũ bao
+ * nhiêu ms, suy luận bao nhiêu fps, model có lỗi gì, MQTT có đang xếp hàng,
+ * và vì sao từng kịch bản đang (không) làm gì. */
+function diagLevel(value, warnAt, badAt) {
+  if (value == null) return '';
+  if (value >= badAt) return 'bad';
+  if (value >= warnAt) return 'warn';
+  return 'ok';
+}
+
+function renderDiagnostics() {
+  const box = $('#diag-cameras');
+  if (!box || !S.state) return;
+  const diag = S.state.diagnostics || {};
+  const cameras = diag.cameras || {};
+  const ids = Object.keys(cameras);
+  box.innerHTML = ids.length ? ids.map((id) => {
+    const row = cameras[id] || {};
+    const zones = row.zones || {};
+    const zoneRows = Object.keys(zones).map((zoneId) => {
+      const zone = zones[zoneId] || {};
+      const state = zone.occupied === true ? '<span class="badge green">có người ×' + (zone.count || 1) + '</span>'
+        : (zone.occupied === false ? '<span class="badge gray">trống</span>' : '<span class="badge amber">chưa rõ</span>');
+      const wait = zone.pending_exit_s != null ? ' · chờ xác nhận vắng ' + Number(zone.pending_exit_s).toFixed(1) + 's' : '';
+      const forced = zone.forced ? ' · <b>đang mô phỏng</b>' : '';
+      return '<div class="diag-row"><span class="mono">' + escapeHtml(zoneId) + '</span>' + state +
+        '<span class="small muted">' + escapeHtml(wait + forced) + '</span></div>';
+    }).join('');
+    const bad = row.connected ? '' : 'bad';
+    return '<div class="diag-cam ' + bad + '">' +
+      '<div class="diag-head"><b>' + escapeHtml(id) + '</b>' +
+      '<span class="badge ' + (row.connected ? 'green' : 'red') + '">' +
+      (row.connected ? 'đang nhận hình' : 'mất hình') + '</span>' +
+      (row.sampled_frame === false ? '<span class="badge amber">khung suy luận lỗi</span>' : '') +
+      '</div>' +
+      '<div class="diag-grid">' +
+      '<span>FPS camera</span><b>' + (row.capture_fps || 0).toFixed(1) + '</b>' +
+      '<span>Nguồn báo</span><b>' + (row.stream_fps || 0).toFixed(0) + ' fps</b>' +
+      '<span>Tuổi khung hình</span><b class="' + diagLevel(row.frame_age_ms, 800, 2000) + '">' +
+        Math.round(row.frame_age_ms || 0) + ' ms</b>' +
+      '<span>Thời gian đọc</span><b>' + Math.round(row.read_ms || 0) + ' ms</b>' +
+      '<span>FPS suy luận</span><b>' + (row.infer_fps || 0).toFixed(1) + ' / ' + (row.detect_fps_target || 0).toFixed(1) + '</b>' +
+      '<span>Suy luận</span><b>' + Math.round(row.inference_ms || 0) + ' ms</b>' +
+      '<span>Lần suy luận trước</span><b>' + (row.infer_age_s == null ? '–' : row.infer_age_s + ' s') + '</b>' +
+      '<span>Lỗi suy luận</span><b class="' + (row.inference_errors ? 'warn' : '') + '">' + (row.inference_errors || 0) +
+        (row.inference_errors_consecutive ? ' (liên tiếp ' + row.inference_errors_consecutive + ')' : '') + '</b>' +
+      '<span>Mở lại kết nối</span><b>' + (row.reconnects || 0) + '</b>' +
+      '</div>' +
+      (row.error ? '<div class="diag-err">' + escapeHtml(row.error + (row.hint ? ' — ' + row.hint : '')) + '</div>' : '') +
+      (row.inference_last_error ? '<div class="diag-err">Suy luận: ' + escapeHtml(row.inference_last_error) + '</div>' : '') +
+      '<div class="diag-zones">' + (zoneRows || '<span class="small muted">chưa có vùng</span>') + '</div>' +
+      '</div>';
+  }).join('') : '<p class="small muted">Chưa có camera.</p>';
+
+  const mqtt = diag.mqtt || {};
+  const det = diag.detector || {};
+  const summary = $('#diag-summary');
+  if (summary) {
+    summary.innerHTML = [
+      'Model: <b>' + escapeHtml(det.name || '–') + '</b> · thiết bị <b>' + escapeHtml(det.device || '–') + '</b>',
+      'MQTT: <b>' + (mqtt.connected ? 'đã nối' : 'mất kết nối') + '</b>' +
+        (mqtt.queued ? ' · <b class="warn">' + mqtt.queued + ' lệnh đang xếp hàng</b>' : '') +
+        ' · đã gửi ' + (mqtt.sent || 0) + ' / nhận ' + (mqtt.received || 0),
+      'Lỗi suy luận tổng: <b>' + (det.errors_total || 0) + '</b>',
+    ].map((line) => '<div class="diag-line">' + line + '</div>').join('');
+  }
+
+  const decisions = $('#diag-decisions');
+  if (decisions) {
+    const rows = diag.decisions || [];
+    decisions.innerHTML = rows.length ? rows.slice().reverse().map((item) =>
+      '<div class="diag-decision"><span class="mono">' + escapeHtml((item.time || '').slice(11)) + '</span>' +
+      '<span class="' + (item.kind === 'command' ? 'ok' : '') + '">' + escapeHtml(item.message || '') + '</span></div>'
+    ).join('') : '<p class="small muted">Chưa có quyết định nào.</p>';
+  }
+
+  const warnBox = $('#diag-warnings');
+  if (warnBox) {
+    const warnings = (S.state.warnings || []).concat(diag.warnings || []);
+    warnBox.innerHTML = warnings.length
+      ? warnings.map((text) => '<div class="diag-err">⚠ ' + escapeHtml(text) + '</div>').join('')
+      : '';
+    warnBox.classList.toggle('show', warnings.length > 0);
+  }
 }
 
 function renderHeader() {
@@ -456,7 +575,9 @@ function renderScenarioStatus(target) {
       '<div class="sc-head"><b>' + escapeHtml(sc.name || sc.id) + '</b>' + badge + paused + sched + disabled +
       '<span class="small muted mono">' + escapeHtml(sc.id) + '</span></div>' +
       '<div style="margin-top:6px">' + pendingHtml + '</div>' +
-      '<div class="bar"><i style="width:' + width + '"></i></div></div>';
+      '<div class="bar"><i style="width:' + width + '"></i></div>' +
+      (sc.reason ? '<div class="why">💡 ' + escapeHtml(sc.reason) + '</div>' : '') +
+      '</div>';
   }).join('');
 }
 
@@ -691,7 +812,9 @@ function activeCameraConfig() {
   return cameras.find((c) => c.id === ZE.cameraId) || cameras[0] || null;
 }
 
-async function loadZoneEditor() {
+async function loadZoneEditor(options = {}) {
+  // Nạp lại từ server sẽ GHI ĐÈ dữ liệu đang sửa → phải hỏi trước.
+  if (!options.force && !confirmDiscardZones('cấu hình vừa được tải lại')) return;
   if (!S.config) await loadConfig();
   const cameras = ((S.config && S.config.cameras) || []).filter((c) => c.enabled !== false);
   const remembered = LS.get('zoneCamera');
@@ -710,17 +833,88 @@ async function loadZoneEditor() {
   ZE.history = []; ZE.future = []; ZE.draft = []; ZE.dirty = false;
   ZE.idRenames = {}; ZE.autoIds = new Set(); ZE.hover = null; ZE.selectedVertex = -1; ZE.idLocked = true;
 
-  const img = $('#zone-img');
-  img.dataset.cam = ZE.cameraId;
-  img.src = '/stream/' + encodeURIComponent(ZE.cameraId) + '.mjpg' + tokenSuffix();
-
+  setZoneImageSource();
   renderZoneSidebar();
   renderZoneAttrs();
   updateDraftBar();
+  updateDirtyBadge();
   drawZoneCanvas();
   loadClassList();
   refreshZonePreview();
   setZoneTool(ZE.mode);
+}
+
+/* Ảnh để vẽ vùng.
+ *
+ * Mặc định là ẢNH TĨNH (đóng băng khung hình hiện tại): vẽ trên hình đang chạy
+ * thì người/đồ vật di chuyển làm mọi thao tác kéo-thả đều trượt. Bấm
+ * “📷 Chụp khung hình” để lấy khung mới, “▶ Trực tiếp” để xem luồng thật.
+ * Ảnh tĩnh cũng giúp nhả webcam (đèn tắt) khi không cần.
+ */
+function setZoneImageSource() {
+  const img = $('#zone-img');
+  if (!img || !ZE.cameraId) return;
+  img.dataset.cam = ZE.cameraId;
+  if (ZE.frozen && ZE.frozenSrc) {
+    img.src = ZE.frozenSrc;
+  } else {
+    img.src = '/stream/' + encodeURIComponent(ZE.cameraId) + '.mjpg' + tokenSuffix();
+  }
+  updateFreezeBadge();
+}
+
+function updateFreezeBadge() {
+  const badge = $('#zone-freeze-state');
+  if (badge) {
+    badge.textContent = ZE.frozen ? '⏸ ảnh tĩnh' : '▶ trực tiếp';
+    badge.classList.toggle('live', !ZE.frozen);
+  }
+  const button = $('#zone-freeze');
+  if (button) button.textContent = ZE.frozen ? '📷 Chụp lại' : '⏸ Đóng băng';
+}
+
+/* Chụp khung hình đang hiển thị thành ảnh tĩnh (data URL) để vẽ cho chắc tay. */
+function freezeZoneFrame() {
+  const img = $('#zone-img');
+  if (!img || !img.naturalWidth) return false;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+    ZE.frozenSrc = canvas.toDataURL('image/jpeg', 0.85);
+    ZE.frozen = true;
+    img.src = ZE.frozenSrc;
+    updateFreezeBadge();
+    drawZoneCanvas();
+    return true;
+  } catch (e) {
+    // Ảnh từ nguồn khác origin (rất hiếm) → giữ luồng trực tiếp, không làm hỏng UI.
+    return false;
+  }
+}
+
+function goLiveZoneFrame() {
+  ZE.frozen = false;
+  ZE.frozenSrc = null;
+  setZoneImageSource();
+  drawZoneCanvas();
+}
+
+/* Sau khi mở tab, chờ khung hình đầu tiên rồi tự đóng băng (thử trong ~5 s). */
+function autoFreezeWhenReady() {
+  if (ZE.frozen) { updateFreezeBadge(); return; }
+  let tries = 0;
+  const attempt = () => {
+    tries += 1;
+    if (S.tab !== 'zones' || ZE.frozen) return;
+    const img = $('#zone-img');
+    if (img && img.naturalWidth) {
+      if (freezeZoneFrame()) return;
+    }
+    if (tries < 25) setTimeout(attempt, 200);
+  };
+  setTimeout(attempt, 250);
 }
 
 function snapshotZones() {
@@ -820,6 +1014,10 @@ async function loadClassList() {
 const VERTEX_HIT_PX = 22;   // bán kính bắt điểm (pixel màn hình) — rộng rãi cho điện thoại
 const EDGE_HIT_PX = 14;     // bán kính bắt cạnh để chèn điểm mới / đổi kích thước
 const EPS_RECT = 0.01;      // chừa 1% để kéo góc/cạnh không lật ngược hình chữ nhật
+const DRAG_THRESHOLD_PX = 4; // phải kéo quá 4 px mới tính là kéo (dưới ngưỡng = bấm)
+const MIN_VERTICES = 3;     // vùng cần ít nhất 3 điểm mới có diện tích
+const MIN_AREA = 0.0008;    // ~0.08% khung hình: nhỏ hơn nữa là bấm nhầm
+const DUP_EPS = 0.004;      // hai điểm gần nhau hơn 0.4% khung hình = điểm trùng
 
 /* Con trỏ chuột cho từng thao tác. Dấu “+” vẽ bằng SVG để thấy rõ “bấm vào đây
  * là thêm điểm” (con trỏ `copy` mặc định của hệ điều hành rất khó nhận ra). */
@@ -852,11 +1050,42 @@ function canvasSize(canvas, img) {
   return { ctx, width: rect.width, height: rect.height, image: imageBox(rect, img) };
 }
 
+/* Khung ảnh THẬT (theo CSS px) mà trình duyệt đang vẽ cho <img>, quy về hệ toạ
+ * độ của canvas.
+ *
+ * Trước đây hàm này tự đoán khung ảnh bằng `min(rect.w/naturalW, rect.h/naturalH)`.
+ * Công thức đó SAI khi ảnh nhỏ hơn khung: CSS `max-width/max-height: 100%` không
+ * bao giờ phóng to ảnh, nên luồng 640×480 trong panel 1100 px vẫn chỉ rộng
+ * 640 px, trong khi công thức tưởng là ~725 px ⇒ vùng vẽ bị lệch tới ~85 px và
+ * toạ độ lưu xuống cũng sai. Dùng `getBoundingClientRect()` của chính <img> là
+ * cách duy nhất đúng với mọi `object-fit`, mọi DPR và mọi kiểu layout.
+ */
 function imageBox(rect, img) {
-  const naturalW = img.naturalWidth || 16, naturalH = img.naturalHeight || 9;
-  const scale = Math.min(rect.width / naturalW, rect.height / naturalH);
+  if (img && img.getBoundingClientRect) {
+    const box = img.getBoundingClientRect();
+    if (box.width > 0.5 && box.height > 0.5) {
+      return { x: box.left - rect.left, y: box.top - rect.top, w: box.width, h: box.height };
+    }
+  }
+  // Ảnh chưa tải / chưa có src: tạm dùng letterbox để không chia cho 0.
+  const naturalW = (img && img.naturalWidth) || 16;
+  const naturalH = (img && img.naturalHeight) || 9;
+  const scale = Math.min(rect.width / naturalW, rect.height / naturalH) || 1;
   const w = naturalW * scale, h = naturalH * scale;
   return { x: (rect.width - w) / 2, y: (rect.height - h) / 2, w, h };
+}
+
+/* Đổi toạ độ con trỏ (clientX/clientY — hệ toạ độ MÀN HÌNH) sang hệ toạ độ của
+ * canvas (góc trên-trái canvas = 0,0). Mọi phép so khoảng cách phải dùng CÙNG
+ * một hệ toạ độ; trước đây `nearestVertex`/`hitEdge` so trực tiếp clientX với
+ * toạ độ trong canvas nên lệch đúng bằng `rect.left/rect.top` — đó là lý do
+ * "kéo điểm hoạt động kém".
+ */
+function canvasPointOf(clientPoint) {
+  const canvas = $('#zone-canvas');
+  if (!canvas) return [clientPoint[0], clientPoint[1]];
+  const rect = canvas.getBoundingClientRect();
+  return [clientPoint[0] - rect.left, clientPoint[1] - rect.top];
 }
 
 function polygonBounds(polygon) {
@@ -919,6 +1148,75 @@ function samePolygon(a, b) {
   return a.every((p, i) => Math.abs(p[0] - b[i][0]) < 1e-6 && Math.abs(p[1] - b[i][1]) < 1e-6);
 }
 
+/* Diện tích đa giác (công thức shoelace, luôn dương). Dùng để bắt "vùng rỗng". */
+function polygonArea(points) {
+  if (!points || points.length < 3) return 0;
+  let total = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const [x1, y1] = points[i];
+    const [x2, y2] = points[(i + 1) % points.length];
+    total += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(total) / 2;
+}
+
+/* Bỏ điểm trùng liền kề (bấm đúp / bấm rung tay rất dễ sinh ra) và điểm cuối
+ * trùng điểm đầu — cả hai đều làm đa giác "vô nghĩa" mà người dùng không thấy. */
+function dedupePolygon(points, eps = DUP_EPS) {
+  const cleaned = [];
+  (points || []).forEach((point) => {
+    const previous = cleaned[cleaned.length - 1];
+    if (previous && Math.hypot(point[0] - previous[0], point[1] - previous[1]) < eps) return;
+    cleaned.push([point[0], point[1]]);
+  });
+  while (cleaned.length > 1) {
+    const first = cleaned[0], last = cleaned[cleaned.length - 1];
+    if (Math.hypot(first[0] - last[0], first[1] - last[1]) >= eps) break;
+    cleaned.pop();
+  }
+  return cleaned;
+}
+
+/* Hai đoạn thẳng a1a2 và b1b2 có cắt nhau (kể cả chạm) không. */
+function segmentsIntersect(a1, a2, b1, b2) {
+  const cross = (o, p, q) => (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0]);
+  const d1 = cross(b1, b2, a1), d2 = cross(b1, b2, a2);
+  const d3 = cross(a1, a2, b1), d4 = cross(a1, a2, b2);
+  return ((d1 > 1e-12 && d2 < -1e-12) || (d1 < -1e-12 && d2 > 1e-12))
+    && ((d3 > 1e-12 && d4 < -1e-12) || (d3 < -1e-12 && d4 > 1e-12));
+}
+
+/* Đa giác tự cắt chính nó (hình số 8) → kết quả "trong vùng" không xác định. */
+function polygonSelfIntersects(points) {
+  const count = (points || []).length;
+  if (count < 4) return false;
+  for (let i = 0; i < count; i += 1) {
+    const a1 = points[i], a2 = points[(i + 1) % count];
+    for (let j = i + 1; j < count; j += 1) {
+      // hai cạnh kề nhau dùng chung một điểm thì bỏ qua
+      if (j === i || (j + 1) % count === i || (i + 1) % count === j) continue;
+      const b1 = points[j], b2 = points[(j + 1) % count];
+      if (segmentsIntersect(a1, a2, b1, b2)) return true;
+    }
+  }
+  return false;
+}
+
+/* Kiểm tra hình học trước khi lưu. Trả về chuỗi lỗi (tiếng Việt) hoặc '' nếu OK. */
+function validatePolygon(points, label) {
+  const cleaned = dedupePolygon(points || []);
+  if (cleaned.length < MIN_VERTICES) {
+    return 'Vùng “' + label + '” cần ít nhất ' + MIN_VERTICES + ' điểm (đang có ' + cleaned.length + ').';
+  }
+  if (polygonArea(cleaned) < MIN_AREA) {
+    return 'Vùng “' + label + '” quá nhỏ hoặc các điểm nằm trên một đường thẳng — hãy kéo rộng ra.';
+  }
+  if (polygonSelfIntersects(cleaned)) {
+    return 'Vùng “' + label + '” bị tự cắt nhau (các cạnh cắt chéo) — hãy sửa lại thứ tự/khoảng cách các điểm.';
+  }
+  return '';
+}
+
 /* Kéo 1 GÓC của hình chữ nhật → đổi chiều dài/rộng, 2 góc kề chạy theo, hình
  * luôn vuông góc và không bị lật (kẹp trong cạnh đối diện). */
 function resizeRectCorner(polygon, index, point) {
@@ -967,6 +1265,7 @@ function applyZoneShape(zone, shape) {
 }
 
 function drawZoneCanvas() {
+  updateDirtyBadge();
   const canvas = $('#zone-canvas');
   const img = $('#zone-img');
   if (!canvas) return;
@@ -1126,12 +1425,14 @@ function pointerToNormalized(event) {
   return [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
 }
 
-function nearestVertex(point, polygon) {
+/* ``clientPoint`` = [clientX, clientY] (hệ màn hình). Hàm tự đổi sang hệ canvas
+ * nên người gọi không phải nhớ; đổi ở ĐÚNG MỘT chỗ để không bị trừ 2 lần. */
+function nearestVertex(clientPoint, polygon) {
   const canvas = $('#zone-canvas');
   const img = $('#zone-img');
   const rect = canvas.getBoundingClientRect();
   const image = imageBox(rect, img);
-  const [px, py] = point;
+  const [px, py] = canvasPointOf(clientPoint);
   let best = null, bestDist = VERTEX_HIT_PX;
   (polygon || []).forEach((vertex, index) => {
     const vx = image.x + vertex[0] * image.w;
@@ -1163,13 +1464,13 @@ function pickVertex(point) {
 /* Tìm cạnh gần con trỏ nhất. Trả về {index, point} với ``index`` là điểm bắt
  * đầu của cạnh — điểm mới sẽ được chèn vào vị trí ``index + 1``, đúng trên
  * đường cạnh (snap) để hình không bị méo khi bấm lệch tay. */
-function hitEdge(point, polygon) {
+function hitEdge(clientPoint, polygon) {
   if (!polygon || polygon.length < 2) return null;
   const canvas = $('#zone-canvas');
   const img = $('#zone-img');
   const rect = canvas.getBoundingClientRect();
   const image = imageBox(rect, img);
-  const [px, py] = point;
+  const [px, py] = canvasPointOf(clientPoint);
   const closed = polygon.length >= 3;
   const edgeCount = closed ? polygon.length : polygon.length - 1;
   let best = null, bestDist = EDGE_HIT_PX;
@@ -1226,9 +1527,17 @@ function newZone(polygon, shape) {
 }
 
 function finishDraftPolygon() {
-  if (ZE.draft.length < 3) { toast('Cần ít nhất 3 điểm để tạo vùng', 'warn'); return; }
+  // Bấm đúp dễ sinh 1-2 điểm trùng ngay trên điểm cuối; bỏ chúng TRƯỚC khi đếm
+  // để "bấm đúp để đóng" không bao giờ tạo ra đa giác 5-6 điểm trùng nhau.
+  const cleaned = dedupePolygon(ZE.draft);
+  if (cleaned.length < MIN_VERTICES) {
+    toast('Cần ít nhất ' + MIN_VERTICES + ' điểm khác nhau để tạo vùng', 'warn');
+    return;
+  }
+  const problem = validatePolygon(cleaned, 'vùng mới');
+  if (problem) { toast(problem, 'err', 7000); return; }
   snapshotZones();
-  ZE.zones.push(newZone(ZE.draft.slice(), 'polygon'));
+  ZE.zones.push(newZone(cleaned, 'polygon'));
   ZE.active = ZE.zones.length - 1;
   ZE.autoIds.add(ZE.zones[ZE.active].id);
   ZE.draft = [];
@@ -1432,6 +1741,14 @@ function wireZoneCanvas() {
     try { canvas.setPointerCapture(event.pointerId); } catch (e) {}
   };
 
+  /* Ghi lại điểm bắt đầu bấm. Chỉ khi con trỏ đi quá DRAG_THRESHOLD_PX thì mới
+   * thật sự kéo — nhờ vậy bấm để CHỌN điểm không làm điểm chạy 1-2 px. */
+  const rememberPress = (clientPoint) => {
+    if (!ZE.drag) return;
+    ZE.drag.press = clientPoint;
+    ZE.drag.started = false;
+  };
+
   canvas.addEventListener('pointerdown', (event) => {
     const clientPoint = [event.clientX, event.clientY];
     const point = pointerToNormalized(event);
@@ -1454,6 +1771,7 @@ function wireZoneCanvas() {
         }
       }
       grabPointer(event);
+      rememberPress(clientPoint);
       drawZoneCanvas();
       return;
     }
@@ -1476,6 +1794,7 @@ function wireZoneCanvas() {
         }
       }
       grabPointer(event);
+      rememberPress(clientPoint);
       drawZoneCanvas();
       return;
     }
@@ -1492,6 +1811,7 @@ function wireZoneCanvas() {
         renderZoneSidebar();
       }
       grabPointer(event);
+      rememberPress(clientPoint);
       drawZoneCanvas();
       return;
     }
@@ -1513,6 +1833,7 @@ function wireZoneCanvas() {
         startVertexDrag(edge.index + 1, false);
       }
       grabPointer(event);
+      rememberPress(clientPoint);
       drawZoneCanvas();
       return;
     }
@@ -1521,6 +1842,7 @@ function wireZoneCanvas() {
     if ((zone.polygon || []).length >= 3 && pointInPolygon(point, zone.polygon)) {
       startZoneMove(point);
       grabPointer(event);
+      rememberPress(clientPoint);
       drawZoneCanvas();
       return;
     }
@@ -1530,6 +1852,7 @@ function wireZoneCanvas() {
       ZE.rectStart = point;
       ZE.drag = { mode: 'rect', current: point };
       grabPointer(event);
+      rememberPress(clientPoint);
       drawZoneCanvas();
       return;
     }
@@ -1555,6 +1878,13 @@ function wireZoneCanvas() {
     const point = pointerToNormalized(event);
     const zone = ZE.zones[ZE.active];
     const drag = ZE.drag;
+    // Ngưỡng kéo: dưới 4 px coi như người dùng chỉ BẤM (chọn/thêm điểm), không
+    // làm điểm chạy theo rung tay.
+    if (drag.mode !== 'rect' && drag.press && !drag.started) {
+      const moved = Math.hypot(clientPoint[0] - drag.press[0], clientPoint[1] - drag.press[1]);
+      if (moved < DRAG_THRESHOLD_PX) return;
+      drag.started = true;
+    }
     if (drag.mode === 'vertex') {
       if (drag.draft) {
         if (ZE.draft[drag.index]) ZE.draft[drag.index] = point;
@@ -1599,9 +1929,20 @@ function wireZoneCanvas() {
     if (ZE.drag && ZE.drag.mode === 'rect' && ZE.rectStart) {
       const [sx, sy] = ZE.rectStart;
       const [ex, ey] = ZE.drag.current || pointerToNormalized(event);
-      if (Math.abs(ex - sx) > 0.02 && Math.abs(ey - sy) > 0.02) {
+      const dragged = Math.hypot((ex - sx) * 1000, (ey - sy) * 1000) > 1;
+      if (dragged) {
+        // Ô quá dẹt (kéo gần như theo một trục) trước đây bị BỎ IM LẶNG; nay nắn
+        // cho nó tối thiểu 2% mỗi chiều để luôn tạo được vùng dùng được.
+        const x1 = Math.min(sx, ex), x2 = Math.max(sx, ex);
+        const y1 = Math.min(sy, ey), y2 = Math.max(sy, ey);
+        const padX = Math.max(0, (0.02 - (x2 - x1)) / 2);
+        const padY = Math.max(0, (0.02 - (y2 - y1)) / 2);
+        const polygon = rectangleFromPoints(
+          [clamp01(x1 - padX), clamp01(y1 - padY)],
+          [clamp01(x2 + padX), clamp01(y2 + padY)],
+        );
         snapshotZones();
-        ZE.zones.push(newZone(rectangleFromPoints([sx, sy], [ex, ey]), 'rect'));
+        ZE.zones.push(newZone(polygon, 'rect'));
         ZE.active = ZE.zones.length - 1;
         ZE.idLocked = true;
         ZE.autoIds.add(ZE.zones[ZE.active].id);
@@ -1618,7 +1959,7 @@ function wireZoneCanvas() {
 
   canvas.addEventListener('dblclick', (event) => {
     event.preventDefault();
-    if (ZE.draft.length >= 3) finishDraftPolygon();
+    if (ZE.draft.length) finishDraftPolygon();
   });
 
   window.addEventListener('resize', debounce(() => { drawZoneCanvas(); }, 150));
@@ -1630,9 +1971,17 @@ function wireZoneCanvas() {
       if (ZE.selectedVertex >= 0) {
         const draft = ZE.draft.length ? ZE.draft : (ZE.zones[ZE.active] && ZE.zones[ZE.active].polygon);
         if (draft) {
+          // Không cho xoá xuống dưới 3 điểm: vùng 2 điểm không có diện tích và
+          // sẽ không lưu được (trước đây bấm Delete 2 lần là hỏng vùng).
+          if (draft.length <= MIN_VERTICES) {
+            toast('Vùng cần ít nhất ' + MIN_VERTICES + ' điểm — muốn bỏ vùng thì dùng “🗑 Xoá vùng”.', 'warn', 5000);
+            event.preventDefault();
+            return;
+          }
           if (!ZE.draft.length) snapshotZones();
           draft.splice(ZE.selectedVertex, 1);
           ZE.selectedVertex = -1;
+          ZE.dirty = true;
           drawZoneCanvas();
           event.preventDefault();
         }
@@ -1729,8 +2078,21 @@ function scenariosUsingZone(ref) {
 
 async function saveZones(extra = {}) {
   if (!ZE.cameraId) return;
-  const invalid = ZE.zones.find((zone) => !zone.polygon || zone.polygon.length < 3);
-  if (invalid) { toast('Vùng “' + (invalid.name || invalid.id) + '” cần ít nhất 3 điểm', 'err'); return; }
+  // Làm sạch + kiểm tra hình học TRƯỚC khi gửi: điểm trùng, vùng quá nhỏ, vùng
+  // tự cắt nhau. Trước đây chỉ kiểm tra ">= 3 điểm" nên vùng hỏng vẫn lưu được.
+  for (let index = 0; index < ZE.zones.length; index += 1) {
+    const zone = ZE.zones[index];
+    const cleaned = dedupePolygon(zone.polygon || []);
+    const label = zone.name || zone.id || ('vùng ' + (index + 1));
+    const problem = validatePolygon(cleaned, label);
+    if (problem) {
+      ZE.active = index;
+      renderZoneSidebar(); renderZoneAttrs(); drawZoneCanvas();
+      toast(problem, 'err', 9000);
+      return;
+    }
+    zone.polygon = cleaned;
+  }
   const present = new Set(ZE.zones.map((zone) => zone.id));
   const renames = {};
   Object.keys(ZE.idRenames).forEach((oldId) => {
@@ -1749,6 +2111,7 @@ async function saveZones(extra = {}) {
     });
     ZE.dirty = false;
     ZE.idRenames = {};
+    updateDirtyBadge();
     const notes = [];
     if (result && result.renamed && Object.keys(result.renamed).length) {
       notes.push('đã cập nhật kịch bản theo mã vùng mới');
@@ -1758,6 +2121,8 @@ async function saveZones(extra = {}) {
     }
     toast('Đã lưu ' + ZE.zones.length + ' vùng cho ' + ZE.cameraId +
       (notes.length ? ' · ' + notes.join(' · ') : ''), 'ok', 6000);
+    // Cảnh báo hình học (vùng tự cắt nhau…) do server kiểm tra lại.
+    ((result && result.warnings) || []).forEach((warning) => toast(warning, 'warn', 12000));
     // loadConfig() tự gọi lại loadZoneEditor() khi đang ở tab Vùng phát hiện.
     await loadConfig();
   } catch (e) {
@@ -2516,6 +2881,31 @@ function wireZoneEditor() {
   $('#class-list').addEventListener('change', syncZoneAttributes);
   $('#class-reload').addEventListener('click', loadClassList);
   $('#btn-refresh-preview').addEventListener('click', refreshZonePreview);
+  const freezeBtn = $('#zone-freeze');
+  if (freezeBtn) {
+    freezeBtn.addEventListener('click', () => {
+      if (ZE.frozen) {
+        // Đang xem ảnh tĩnh: bấm = chụp LẠI khung mới nhất (mở luồng trong giây lát).
+        ZE.frozen = false;
+        ZE.frozenSrc = null;
+        setZoneImageSource();
+        const img = $('#zone-img');
+        const once = () => { img.removeEventListener('load', once); freezeZoneFrame(); };
+        img.addEventListener('load', once);
+        toast('Đang lấy khung hình mới…', '');
+      } else {
+        if (freezeZoneFrame()) toast('Đã đóng băng khung hình để vẽ cho chắc tay', 'ok');
+        else toast('Chưa có khung hình để chụp — thử lại sau 1-2 giây', 'warn');
+      }
+    });
+  }
+  const liveBtn = $('#zone-live');
+  if (liveBtn) {
+    liveBtn.addEventListener('click', () => {
+      goLiveZoneFrame();
+      toast('Đang xem luồng trực tiếp — vẽ trên hình động sẽ khó canh hơn', 'warn', 5000);
+    });
+  }
   wireZoneCanvas();
 }
 
