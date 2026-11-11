@@ -415,3 +415,55 @@ def test_zone_shape_survives_yaml_and_ui_roundtrip(tmp_path: Path) -> None:
     assert "shape: rect" in config_to_yaml(reloaded)
     ui = config_to_ui_dict(reloaded)
     assert ui["cameras"][0]["zones"][0]["shape"] == "rect"
+
+
+# --------------------------------------------------------------------------- #
+# Lịch hoạt động: khung qua đêm + danh sách thứ (lỗi thật: mất "ngày sở hữu")
+# --------------------------------------------------------------------------- #
+def test_cross_midnight_window_uses_the_previous_day_for_after_midnight() -> None:
+    # 22:00 Thứ 2 → 06:00 Thứ 3: 01:00 Thứ 3 vẫn thuộc "đêm Thứ 2".
+    schedule = ScheduleConfig.model_validate({"from": "22:00", "to": "06:00", "days": [0]})
+    assert schedule.is_active(23, 0, 0)      # 23:00 Thứ 2
+    assert schedule.is_active(1, 0, 1)       # 01:00 Thứ 3 (đuôi của đêm Thứ 2)
+    assert not schedule.is_active(1, 0, 2)   # 01:00 Thứ 4 (đêm Thứ 3, không bật)
+    assert not schedule.is_active(12, 0, 0)  # giữa trưa Thứ 2: ngoài khung
+
+
+def test_schedule_rejects_equal_bounds() -> None:
+    # from == to từng được hiểu ngầm là "cả ngày" — dễ gây bật đèn 24/7 ngoài ý muốn.
+    with pytest.raises(Exception) as excinfo:
+        ScheduleConfig.model_validate({"from": "08:00", "to": "08:00"})
+    assert "08:00" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
+# Vùng: hình học vô nghĩa phải bị chặn ngay ở tầng cấu hình
+# --------------------------------------------------------------------------- #
+def test_zone_with_duplicate_consecutive_points_is_cleaned() -> None:
+    starter_data = globals()['starter_data']()
+    camera = starter_data["cameras"][0]
+    camera["zones"][0]["polygon"] = [
+        [0.10, 0.30], [0.10, 0.30], [0.60, 0.30], [0.60, 0.90], [0.10, 0.90],
+    ]
+    cfg = AppConfig.model_validate(starter_data)
+    polygon = cfg.cameras[0].zones[0].polygon
+    assert len(polygon) == 4, "điểm trùng liền kề phải được tự bỏ"
+
+
+def test_zone_with_zero_area_is_rejected() -> None:
+    starter_data = globals()['starter_data']()
+    camera = starter_data["cameras"][0]
+    camera["zones"][0]["polygon"] = [[0.10, 0.30], [0.20, 0.30], [0.30, 0.30], [0.40, 0.30]]
+    with pytest.raises(Exception) as excinfo:
+        AppConfig.model_validate(starter_data)
+    assert "diện tích" in str(excinfo.value) or "thẳng hàng" in str(excinfo.value)
+
+
+def test_zone_state_topic_colliding_with_action_topic_is_reported() -> None:
+    starter_data = globals()['starter_data']()
+    camera = starter_data["cameras"][0]
+    action_topic = starter_data["scenarios"][0]["on_enter"][0]["publish"]["topic"]
+    camera["zones"][0]["state_topic"] = action_topic
+    cfg = AppConfig.model_validate(starter_data)
+    warnings = cfg.topic_warnings()
+    assert any(action_topic in warning for warning in warnings), warnings

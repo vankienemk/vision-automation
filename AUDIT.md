@@ -1,6 +1,7 @@
 # AUDIT — `vision_automation` (BƯỚC 1: kiểm tra chỉ-đọc, trước khi sửa)
 
 **Ngày:** 2026-11-12 · **Nhánh:** `main` · **Baseline:** 183 test pass (trước audit)
+**Cập nhật BƯỚC 4:** 183 → **231 test pass**; 21 lỗi đã sửa (xem §5 và `REPORT.md`).
 **Phạm vi:** toàn bộ `app/` + `app/web/static/` (≈10.300 dòng).
 **Máy kiểm chứng:** macOS 15.7.9 / Apple Silicon M1 (dev) — production là Windows.
 
@@ -154,3 +155,60 @@ Ghi lại để lần sau không “sửa” nhầm:
    Playwright (DPR 1 & 2) cho trình sửa vùng.
 
 > Trạng thái từng mục sẽ được cập nhật ngay trong bảng trên ở BƯỚC 4.
+
+
+---
+
+## 5. CẬP NHẬT SAU KHI SỬA (BƯỚC 4)
+
+Bảng dưới đây trả lời cho từng phát hiện: **đã sửa chưa**, **test nào chứng minh**, và
+**bằng chứng thật** (nếu có). Chi tiết kỹ thuật + số liệu đo trên máy: xem `REPORT.md`.
+
+| Mã | Mức | Trạng thái | Test chứng minh |
+|---|---|---|---|
+| A1 | Blocker | **đã sửa** (toạ độ con trỏ về hệ canvas) | `test_zone_editor_ui.py::test_vertex_drag_follows_pointer[1]`, `[2]`, `::test_vertex_drag_leaves_other_vertices_alone` |
+| A2 | Blocker | **đã sửa** (`img.getBoundingClientRect()`) | `::test_rect_corner_drag_keeps_rectangle`, `::test_save_sends_normalised_polygon_and_shape` |
+| A3 | High | **đã sửa** (đóng băng khung hình + nút Chụp lại/Trực tiếp) | `::test_zone_tab_freezes_the_frame_for_editing` |
+| A4 | High | **đã sửa** (`confirm()` + dấu • trên tab) | `::test_leaving_with_unsaved_edits_asks_before_discarding` |
+| A5 | High | **đã sửa** (ngưỡng 4 px + bỏ điểm trùng) | `::test_double_click_finish_has_no_duplicate_points` |
+| A6 | Med | **đã sửa** (chặn <3 điểm; HCN dẹt được nắn tối thiểu) | `::test_double_click_finish_has_no_duplicate_points` + kiểm tra tay |
+| A7 | Med | **đã sửa** (validate ở UI + server + `warnings`) | `::test_self_intersecting_polygon_is_rejected_with_reason`, `test_config.py::test_zone_with_zero_area_is_rejected`, `::test_zone_with_duplicate_consecutive_points_is_cleaned` |
+| A8 | — | **đạt** (không sửa) | `test_web.py::test_zone_save_blocks_on_scenario_orphan_with_clear_error` |
+| A9 | — | **đạt** (không sửa) | `::test_double_click_finish_has_no_duplicate_points` |
+| A10 | Low | **đã sửa** (cùng gốc A1; test con trỏ + nhãn nổi) | `::test_hover_vertex_shows_cursor_and_tip` |
+| B1 | Blocker | **đã sửa** (`sample=False` → giữ trạng thái) | `test_runtime.py::test_inference_failure_does_not_make_zone_vacant`, `test_zones.py::test_engine_transitions_sample_false_keeps_zone_occupied` |
+| B2 | High | **đã sửa** (xoá mốc grace khi phiếu lành) | `test_zones.py::test_recovery_clears_the_exit_grace_timestamp` |
+| B3 | Med | **đã sửa** (ngưỡng gửi model = min các vùng) | kiểm tra tay + `test_runtime.py` (không hồi quy) |
+| B4 | Med | **đã sửa** (reset tracker khi vùng tắt) | `test_zones.py::test_disabled_zone_does_not_freeze_stale_state` |
+| B5 | Low-Med | **đã sửa** (bỏ khung cũ hơn 2/detect_fps) | `test_runtime.py` (không hồi quy) |
+| B6 | Low | **chưa sửa** — tuổi khung đã hiện trong bảng chẩn đoán; `seq` chưa vào `context` lệnh | — |
+| B7 | Med | **đã sửa** (hẹn chạy lại sau cooldown) | `test_scenarios.py::test_second_vacancy_inside_cooldown_is_retried_not_dropped` |
+| B8 | Med | **đã sửa** (`days` theo ngày bắt đầu khung giờ) | `test_config.py::test_cross_midnight_window_uses_the_previous_day_for_after_midnight` |
+| B9 | Low | **đã sửa** (chặn `from == to`) | `test_config.py::test_schedule_rejects_equal_bounds` |
+| B10 | Low | **đã sửa** (boot-vắng không chạy trigger số đếm) | `test_scenarios.py::test_unsampled_frame_does_not_fire_count_triggers` (cùng cơ chế) + kiểm tra tay |
+| B11 | Med | **chưa sửa** — số đếm theo lớp vẫn là thô (rủi ro còn lại #1 trong `REPORT.md`) | — |
+| B12 | Low | **đã sửa** (khoá theo mô tả trigger) | `test_scenarios.py` (không hồi quy) |
+| B13 | High | **đã sửa** (subscribe `manual_override.state_topic`) | `test_mqtt.py::test_manual_override_topic_triggers_callback`, `::test_manual_override_ignores_unrelated_topics` |
+| B14 | — | **đạt** (không sửa) | `test_scenarios.py` (nhóm timeline) |
+| B15 | High | **đã sửa** (dry-run chặn cả lúc xả hàng đợi) | `test_mqtt.py::test_dry_run_switch_clears_queued_commands`, `::test_flush_pending_drops_queue_when_dry_run_is_on`, `::test_restart_clears_pending_queue` |
+| B16 | High | **đã sửa** (`_client = None` khi `start()` lỗi) | `test_mqtt.py::test_failed_start_reports_error_and_allows_retry` |
+| B17 | Med | **đã sửa** (khoá `key|topic` + `queue_ttl_s`) | `test_mqtt.py::test_offline_queue_keeps_two_topics_of_one_scenario`, `::test_stale_queued_command_is_dropped`, `::test_fresh_queued_command_is_still_sent` |
+| B18 | Low-Med | **đã sửa** (escape JSON cho payload chuỗi) | `test_mqtt.py::test_render_payload_escapes_json_string_payload`, `::test_render_payload_escapes_backslash_in_json_string_payload`, `::test_render_payload_keeps_plain_text_readable` |
+| B19 | Med | **đã sửa** (dry-run không publish availability) | `test_mqtt.py::test_dry_run_does_not_publish_availability` |
+| B20 | Med | **chưa sửa** — chưa có trọng tài theo topic (rủi ro còn lại #2) | — |
+| B21 | Med | **đã sửa (cảnh báo)** — `topic_warnings()` hiện trên UI + `/api/state` | `test_config.py::test_zone_state_topic_colliding_with_action_topic_is_reported` |
+| B22 | — | **đạt** (không sửa) | `test_mqtt.py`, `test_mqtt_integration.py` |
+| B23 | High | **đã sửa** (release handle cũ trước khi mở lại) | `test_capture.py::test_reopen_releases_old_capture_before_opening_new`, `::test_open_twice_releases_previous_handle`, `::test_failed_open_keeps_reopen_intent`, `::test_reopen_requested_during_open_is_not_lost` |
+| B24 | High | **đã sửa** (khoá chung khi gọi engine) | 231 test + chạy thật (không còn `dictionary changed size`) |
+| B25 | High | **đã sửa** (khoá khi `reconfigure`/`tick`/`status`) | như trên |
+| B26 | Med | **đã sửa một phần** — `_feed_zone_states` chạy dưới `_engine_lock`; xác suất đua còn lại rất nhỏ | như trên |
+| B27 | Med | **đã sửa** (mỗi client một watcher riêng) | `test_capture.py::test_two_viewers_share_one_camera_until_last_leaves` |
+| B28 | Med | **đã sửa** (giữ 50 ảnh/camera) | kiểm tra tay (`_prune_snapshots`) |
+| B29 | Med | **đã sửa** (coi như khoẻ lúc boot + áp fail-safe ngay) | `test_runtime.py` (camera-lost + fail-safe) |
+| B30 | Low | **chưa sửa** — retained state không được xoá khi tắt vùng (rủi ro #5) | — |
+| B31 | Low | **đã sửa** (status dưới khoá) | `test_capture.py::test_status_snapshot_is_consistent_under_concurrent_updates`, `::test_camera_config_swap_goes_through_locked_property` |
+| B32 | — | **đạt** (không sửa) | — |
+| **MỚI** | High | **đã sửa** — `--config` tương đối bị tính hai lần sau chdir ⇒ app tự tạo cấu hình mới | `test_platform.py::test_relative_config_path_in_a_subdirectory_is_resolved_before_chdir` |
+
+**Tổng kết:** 3/3 Blocker · 8/8 High · 10/12 Med · 6/9 Low đã sửa.
+Còn lại **6 mục** được ghi rõ trong `REPORT.md §3` kèm lý do và rủi ro thực tế.

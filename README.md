@@ -292,11 +292,25 @@ Bỏ qua bước nào cũng được — mọi thứ sửa lại được sau tr
 - Mất camera: khung hình **đứng ở ảnh cuối** + cảnh báo đỏ, UI **không bao giờ treo**.
 - Hình bị trễ (đường truyền đệm khung): cảnh báo vàng `Hình đang trễ X.X s` —
   xem [§16](#16-xử-lý-sự-cố) để biết cách khắc phục.
+- **Bảng chẩn đoán** (ngay dưới phần trạng thái vùng): FPS camera, fps nguồn báo,
+  **tuổi khung hình (ms)**, thời gian đọc khung, FPS/thời gian suy luận, lần suy luận
+  gần nhất cách đây bao lâu, **số lỗi suy luận**, số lần mở lại kết nối, trạng thái
+  từng vùng (kèm "chờ xác nhận vắng" và "đang mô phỏng"), MQTT đã gửi/nhận và số lệnh
+  đang xếp hàng.
+- **Giải thích quyết định**: danh sách 30 quyết định gần nhất, mỗi dòng nói rõ
+  *vì sao* có (hoặc không có) lệnh — ví dụ
+  `Gửi “Giảm sáng” tới zigbee2mqtt/den_bep/set vì vùng “Khu bếp” đã trống đủ thời gian chờ rời vùng`.
+  Thẻ kịch bản ở tab Mô phỏng/Nhật ký cũng có dòng 💡 giải thích trạng thái hiện tại.
 
 ### ⬛ Vùng phát hiện
 
 1. Chọn camera (camera test có nhãn **TEST**). App **nhớ camera đang chọn** (lưu trong trình duyệt),
    nên mở lại UI hay khởi động lại app vẫn vào đúng camera đó — không tự nhảy về camera đầu danh sách.
+0. **Ảnh để vẽ là ẢNH TĨNH** (app tự "đóng băng" khung hình khi mở tab): vẽ trên hình
+   đang chạy thì người/đồ vật di chuyển làm mọi thao tác kéo-thả đều trượt. Bấm
+   **📷 Chụp lại** để lấy khung mới, **▶ Trực tiếp** để xem luồng thật (nhãn cạnh nút cho
+   biết đang ở chế độ nào). Ảnh tĩnh cũng giúp webcam nhả máy (đèn tắt) khi không cần.
+   Đang sửa mà rời tab/đổi camera khi **chưa lưu** thì app **hỏi trước** (biểu tượng • trên tab).
 2. Bấm **Vẽ đa giác** rồi click từng điểm trên ảnh; **nhấn đúp** hoặc **Hoàn tất vùng** để đóng.
    (Hoặc **Vẽ hình chữ nhật** rồi kéo chuột để tạo nhanh.)
 3. **Con trỏ chuột cho biết bấm vào sẽ ra gì** (kèm nhãn nổi ngay cạnh con trỏ):
@@ -644,6 +658,16 @@ mosquitto_pub -h 192.168.1.10 -t zigbee2mqtt/den_bep/set -m '{"state":"ON"}'
 
 ---
 
+### Vẽ vùng / kéo điểm — những điều nên biết
+
+| Hiện tượng | Nguyên nhân & cách xử lý |
+|---|---|
+| Kéo điểm mà **cả vùng chạy theo** | Bạn đang bấm vào **giữa vùng** (con trỏ ✥) chứ không phải vào điểm (con trỏ ✋). Rê chuột cho tới khi **điểm sáng vàng** rồi mới kéo. |
+| Vùng vẽ ra **không khớp** hình | Đang ở chế độ **▶ Trực tiếp** (hình động). Bấm **📷 Chụp lại** để vẽ trên ảnh tĩnh. |
+| Không thêm được điểm | Vùng **hình chữ nhật** thì kéo chấm giữa cạnh = đổi kích thước (không thêm điểm). Muốn tự do thêm điểm: đổi **Kiểu vùng → Đa giác tự do**. |
+| Lưu báo “vùng tự cắt nhau” | Các cạnh cắt chéo (hình số 8). Sửa lại thứ tự/khoảng cách điểm — vùng tự cắt cho kết quả “trong vùng” sai. |
+| Lưu báo “đang được kịch bản sử dụng” | Đổi **tên** vùng thay vì xoá, hoặc xoá kịch bản đó trước. (Mã vùng đã bị **khoá** để đổi tên không làm hỏng kịch bản.) |
+
 ## 16. Xử lý sự cố
 
 | Hiện tượng | Nguyên nhân & cách sửa |
@@ -748,14 +772,19 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**183 test**) phủ:
+Bộ test (**231 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
 - **`tests/test_zones.py`** — hình học đa giác, neo, `overlap_ratio`, bỏ phiếu 3/5 + grace.
 - **`tests/test_scenarios.py`** — máy trạng thái với **đồng hồ giả**: timeline mờ/tắt,
   khung giờ, dwell, count_ge/le, class_present, cooldown, tạm dừng khi chỉnh tay.
 - **`tests/test_capture.py`** — nguồn ảnh/video, khung mới nhất, lazy open, cách ly lỗi.
-- **`tests/test_mqtt.py`** — template payload, dry-run, hàng chờ chỉ giữ trạng thái mới nhất.
+- **`tests/test_mqtt.py`** — template payload + escape JSON, dry-run (kể cả sau khi
+  broker nối lại), hàng chờ theo topic + TTL, `start()` tự phục hồi, tạm dừng khi chỉnh tay.
+- **`tests/test_zone_editor_ui.py`** — **Playwright + Chromium thật** (DPR 1 **và** 2):
+  kéo điểm/cạnh/góc đúng dưới con trỏ, không xê dịch điểm khác, con trỏ + nhãn đổi theo
+  thao tác, bấm đúp không sinh điểm trùng, đóng băng khung hình, cảnh báo khi bỏ thay đổi,
+  bảng chẩn đoán hiện số thật, chặn vùng tự cắt nhau.
 - **`tests/test_mqtt_integration.py`** — **broker MQTT thật** (amqtt): gửi/nhận, retained,
   mất mạng rồi kết nối lại, dry-run không gửi gì.
 - **`tests/test_runtime.py`** — nối toàn bộ pipeline với detector giả, mô phỏng, fail-safe.
@@ -793,7 +822,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 183 test (pytest), gồm test_platform.py
+├── tests/                  # 231 test (pytest + Playwright UI), gồm test_platform.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
@@ -838,7 +867,7 @@ Bảng dưới là kết quả đo được khi phát triển, không phải suy
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest` | **183/183 pass** (~22 s) |
+| `pytest` | **231/231 pass** (~30 s) |
 | RTSP thật `rtsp://192.168.1.50:554/live.sdp` (640×480, nguồn 10 fps) | chạy **> 6 phút liên tục**: `capture_fps 10.0`, `read_ms 110`, **`frame_age_ms 30`** (trước khi sửa: trễ ~3 s, hễ ~20 s lại `Luồng treo quá 10s`), **0** lần treo trong log, `FPS suy luận 4.0` |
 | Sự cố “treo liên tục + trễ 3 s” | hai lỗi gốc: (1) `_on_config_change` ném `IndexError` tại `running = {name.split("-", 1)[1] …}` nên **không bao giờ tạo luồng suy luận** cho camera thêm từ UI; (2) đọc RTSP bị **giới hạn tốc độ theo `fps`** nên khung dư dồn mãi → trễ dần rồi đứng. Đã sửa + thêm 6 test hồi quy |
 | Hot-reload bật/tắt camera đang chạy | `{"value": false}` → `Dừng luồng suy luận live_sdp`; `{"value": true}` → `Luồng suy luận live_sdp bắt đầu`; **không** còn `IndexError` |
