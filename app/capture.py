@@ -21,9 +21,10 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Iterable
+from uuid import uuid4
 
 import cv2
 import numpy as np
@@ -239,7 +240,10 @@ class CaptureWorker:
         on_status: StatusCallback | None = None,
         mirror_override: bool | None = None,
     ) -> None:
-        self.camera = camera
+        #: ``RLock`` vì getter :attr:`camera` có thể được gọi lại từ trong một
+        #: vùng đã khoá (vd ``_describe()`` khi setter cập nhật ``source_desc``).
+        self._lock = threading.RLock()
+        self._camera = camera
         self.camera_id = camera.id
         self.log = logger or LOGGER.getChild(f"capture.{camera.id}")
         self._on_status = on_status
@@ -249,7 +253,9 @@ class CaptureWorker:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._reopen = threading.Event()
-        self._lock = threading.Lock()
+        #: Tăng mỗi lần :meth:`request_reopen` để không xoá mất yêu cầu mở lại
+        #: đến trong lúc đang mở (xem vòng lặp ``_run``).
+        self._reopen_generation = 0
         self._latest: FramePacket | None = None
         self._seq = 0
         self._sig: np.ndarray | None = None
@@ -264,6 +270,20 @@ class CaptureWorker:
         self._consecutive_failures = 0
         self._black_frames = 0
         self._image_frame: np.ndarray | None = None
+
+    # -- cấu hình (đổi cấu hình phải đi qua property để không bị "xé") ------ #
+    @property
+    def camera(self) -> CameraConfig:
+        """Cấu hình camera hiện tại (đọc/ghi đều dưới khoá)."""
+        with self._lock:
+            return self._camera
+
+    @camera.setter
+    def camera(self, camera: CameraConfig) -> None:
+        with self._lock:
+            self._camera = camera
+            # Nguồn có thể đổi (rtsp → webcam…): giữ mô tả nguồn khớp cấu hình.
+            self._status.source_desc = self._describe()
 
     # -- lifecycle -------------------------------------------------------- #
     def _describe(self) -> str:
@@ -304,11 +324,13 @@ class CaptureWorker:
         self._close_capture()
         with self._lock:
             self._latest = None
-        self._status.is_open = False
-        self._status.connected = False
+        self._update_status(is_open=False, connected=False)
         self._emit_status()
 
     def request_reopen(self) -> None:
+        """Yêu cầu mở lại; nhiều lời gọi liên tiếp gộp thành một lần mở lại."""
+        with self._lock:
+            self._reopen_generation += 1
         self._reopen.set()
 
     # -- lazy open -------------------------------------------------------- #
@@ -316,28 +338,47 @@ class CaptureWorker:
         with self._watcher_lock:
             self._watchers.add(reason)
             count = len(self._watchers)
-        self._status.watchers = count
+        self._update_status(watchers=count)
         if count:
             self._force_open = True
-            self._reopen.set()
+            self.request_reopen()
             self._emit_status()
             if self._thread is None or not self._thread.is_alive():
                 self.start()
 
+    def add_watcher_auto(self, prefix: str = "viewer") -> str:
+        """Đăng ký một người xem với id **duy nhất**; trả về id để xoá sau.
+
+        Hai tab MJPEG cùng xem một camera phải là hai watcher riêng, nếu không
+        đóng một tab là camera bị tắt (đèn tắt) dù tab kia vẫn đang xem.
+        """
+        watcher_id = f"{prefix}:{uuid4().hex[:8]}"
+        self.add_watcher(watcher_id)
+        return watcher_id
+
     def remove_watcher(self, reason: str) -> None:
+        """Bỏ một người xem; id không tồn tại cũng không ném lỗi (idempotent)."""
         with self._watcher_lock:
             self._watchers.discard(reason)
             count = len(self._watchers)
-        self._status.watchers = count
+        self._update_status(watchers=count)
         if count == 0 and self.camera.lazy_open:
             self._force_open = False
             # the loop closes the device on its next iteration
         self._emit_status()
 
+    def remove_watcher_auto(self, watcher_id: str) -> None:
+        """Bí danh của :meth:`remove_watcher` cho id do :meth:`add_watcher_auto` sinh."""
+        self.remove_watcher(watcher_id)
+
     @property
     def watchers(self) -> int:
         with self._watcher_lock:
             return len(self._watchers)
+
+    def is_wanted(self) -> bool:
+        """True khi camera cần được mở (không lazy, hoặc còn người xem)."""
+        return self._wanted()
 
     def _wanted(self) -> bool:
         if not self.camera.lazy_open:
@@ -377,25 +418,54 @@ class CaptureWorker:
         return None if packet is None else packet.frame.copy()
 
     def status(self) -> CaptureStatus:
-        """Live status snapshot (frame age is computed at read time)."""
+        """Bản sao trạng thái tại một thời điểm (tuổi khung hình tính lúc đọc).
+
+        Luôn trả về **bản sao**: UI có thể đọc nhiều trường mà không bao giờ thấy
+        trạng thái nửa cũ nửa mới do luồng camera đang ghi dở.
+        """
         with self._lock:
             packet = self._latest
+            snapshot = replace(self._status)
         if packet is not None:
-            self._status.frame_age_ms = packet.age() * 1000.0
-        return self._status
+            snapshot.frame_age_ms = packet.age() * 1000.0
+        return snapshot
 
     # -- status plumbing -------------------------------------------------- #
+    def _status_snapshot(self) -> CaptureStatus:
+        """Bản sao trạng thái dùng nội bộ (không tính tuổi khung hình)."""
+        with self._lock:
+            return replace(self._status)
+
+    def _update_status(self, **changes: object) -> None:
+        """Ghi một nhóm trường trạng thái trong **một** lần khoá."""
+        with self._lock:
+            for name, value in changes.items():
+                setattr(self._status, name, value)
+
+    def _bump_status(self, name: str, delta: int = 1) -> int:
+        """Cộng dồn một trường số nguyên dưới khoá; trả về giá trị mới."""
+        with self._lock:
+            value = int(getattr(self._status, name)) + delta
+            setattr(self._status, name, value)
+            return value
+
     def _emit_status(self) -> None:
-        if self._on_status is not None:
-            try:
-                self._on_status(self._status)
-            except Exception:  # noqa: BLE001 - callbacks must never break capture
-                self.log.debug("status callback lỗi", exc_info=True)
+        callback = self._on_status
+        if callback is None:
+            return
+        # Bản sao được chụp *trước* khi gọi callback: callback không bao giờ giữ
+        # được object trạng thái sống, và ta không giữ khoá khi gọi nó.
+        snapshot = self.status()
+        try:
+            callback(snapshot)
+        except Exception:  # noqa: BLE001 - callbacks must never break capture
+            self.log.debug("status callback lỗi", exc_info=True)
 
     def _set_error(self, message: str | None, hint: str | None = None) -> None:
-        changed = message != self._status.error or hint != self._status.hint
-        self._status.error = message
-        self._status.hint = hint
+        with self._lock:
+            changed = message != self._status.error or hint != self._status.hint
+            self._status.error = message
+            self._status.hint = hint
         if changed and message:
             self.log.warning("%s%s", message, f" — {hint}" if hint else "")
         self._emit_status()
@@ -425,30 +495,40 @@ class CaptureWorker:
 
     # -- main loop -------------------------------------------------------- #
     def _run(self) -> None:
-        self.log.info("Luồng camera %s bắt đầu (%s)", self.camera_id, self._status.source_desc)
+        self.log.info(
+            "Luồng camera %s bắt đầu (%s)", self.camera_id, self._status_snapshot().source_desc
+        )
         while not self._stop_event.is_set():
             if not self._wanted():
                 if self._cap is not None:
                     self._close_capture()
                     self.log.info("Đóng %s (không còn ai xem)", self.camera_id)
-                    self._status.is_open = False
-                    self._status.connected = False
                     with self._lock:
                         self._latest = None
+                    self._update_status(is_open=False, connected=False)
                     self._emit_status()
                 self._stop_event.wait(0.4)
                 continue
 
             if self._cap is None or self._reopen.is_set():
-                self._reopen.clear()
+                # Số "thế hệ" yêu cầu trước khi mở: mở RTSP có thể mất vài
+                # giây, và một yêu cầu đến *trong lúc* mở (watchdog, đổi cấu
+                # hình) không được bị xoá mất.
+                with self._lock:
+                    generation = self._reopen_generation
+                # Chỉ xoá cờ sau khi mở **thành công**: mở lỗi thì vẫn giữ ý
+                # định mở lại cho vòng sau (watchdog đã yêu cầu).
                 if not self._open():
                     self._wait_backoff()
                     continue
+                with self._lock:
+                    if self._reopen_generation == generation:
+                        self._reopen.clear()
 
             started = time.perf_counter()
             ok, frame = self._read_frame()
             read_ms = (time.perf_counter() - started) * 1000.0
-            self._status.read_ms = read_ms
+            self._update_status(read_ms=read_ms)
             if not ok or frame is None:
                 self._consecutive_failures += 1
                 self.log.debug("Đọc khung hình thất bại (%d lần)", self._consecutive_failures)
@@ -475,53 +555,62 @@ class CaptureWorker:
         return self._cap.read()
 
     def _publish(self, frame: np.ndarray, started: float) -> None:
-        if self._mirror and self.camera.source in {"webcam", "file", "image"}:
+        source = self.camera.source
+        if self._mirror and source in {"webcam", "file", "image"}:
             frame = cv2.flip(frame, 1)
 
         # Permission denial and dead plugs both surface as a black image.
-        if self.camera.source == "webcam" and self._black_frames < 40:
+        # ``_black_frames`` chỉ luồng camera chạm tới nên không cần khoá.
+        if source == "webcam" and self._black_frames < 40:
             if looks_black(frame):
                 self._black_frames += 1
                 if self._black_frames == 20:
-                    self._status.permission_denied = True
+                    self._update_status(permission_denied=True)
                     self._mark_lost("Camera trả về ảnh đen", WEB_CAM_PERMISSION_HINT)
             elif self._black_frames:
                 self._black_frames = 0
-                self._status.permission_denied = False
+                self._update_status(permission_denied=False)
 
         height, width = frame.shape[:2]
         now_mono = time.monotonic()
+        wall_time = time.time()
+        signature = frame_signature(frame)  # tính ngoài khoá cho rẻ
+        capture_fps = self._measured_fps(now_mono)
+        #: Phát hành khung hình **và** trạng thái trong cùng một lần khoá: UI
+        #: không bao giờ thấy ``connected=True`` đi kèm con số của khung trước.
         with self._lock:
             self._seq += 1
-            packet = FramePacket(
+            self._latest = FramePacket(
                 seq=self._seq,
                 frame=frame,
                 captured_at=now_mono,
-                wall_time=time.time(),
+                wall_time=wall_time,
                 width=width,
                 height=height,
             )
-            self._latest = packet
-            self._sig = frame_signature(frame)
-
-        self._status.connected = True
-        self._status.stale = False
-        self._status.last_frame_at = time.time()
-        self._status.frames_total += 1
-        if self._status.error or self._status.permission_denied:
-            if not self._status.permission_denied:
-                self._status.error = None
-                self._status.hint = None
+            self._sig = signature
+            status = self._status
+            status.connected = True
+            status.stale = False
+            status.last_frame_at = wall_time
+            status.frames_total += 1
+            status.capture_fps = capture_fps
+            if status.error and not status.permission_denied:
+                status.error = None
+                status.hint = None
         self._backoff = self.camera.reconnect.initial_s
 
-        # capture FPS = frames seen in the last 2 seconds
+    def _measured_fps(self, now_mono: float) -> float:
+        """FPS đo được trong ~2 giây gần nhất (chỉ luồng camera gọi)."""
         self._frame_times.append(now_mono)
         cutoff = now_mono - 2.0
         while self._frame_times and self._frame_times[0] < cutoff:
             self._frame_times.pop(0)
         if len(self._frame_times) > 1:
             span = self._frame_times[-1] - self._frame_times[0]
-            self._status.capture_fps = (len(self._frame_times) - 1) / span if span > 0 else 0.0
+            if span > 0:
+                return (len(self._frame_times) - 1) / span
+        return self._status_snapshot().capture_fps
 
     def _enforce_rate(self, started: float) -> None:
         """Pace the reader for sources that deliver frames faster than real time.
@@ -550,21 +639,27 @@ class CaptureWorker:
         self._backoff = min(
             self.camera.reconnect.max_s, self._backoff * self.camera.reconnect.factor
         )
-        self._status.reconnects += 1
+        self._bump_status("reconnects")
         self._emit_status()
         self.log.info("Thử lại camera %s sau %.1fs", self.camera_id, delay)
         self._stop_event.wait(delay)
 
     def _mark_lost(self, message: str, hint: str | None = None) -> None:
-        was_connected = self._status.connected
-        self._status.connected = False
-        self._status.stale = was_connected
+        with self._lock:
+            was_connected = self._status.connected
+            self._status.connected = False
+            self._status.stale = was_connected
         self._set_error(message, hint)
 
     # -- open / close ----------------------------------------------------- #
     def _open(self) -> bool:
         cam = self.camera
-        self._status.permission_denied = False
+        #: Mở lại **phải** giải phóng handle cũ trước. Nếu chỉ ghi đè ``_cap``,
+        #: mỗi lần camera treo (watchdog) hoặc đổi cấu hình là rò một
+        #: ``VideoCapture`` + luồng giải mã FFmpeg + socket — không giới hạn
+        #: trong nhiều ngày chạy 24/7.
+        self._close_capture()
+        self._update_status(permission_denied=False)
         try:
             if cam.source == "rtsp":
                 cap = self._open_rtsp()
@@ -583,9 +678,6 @@ class CaptureWorker:
         if cap is None:
             return False
         self._cap = cap
-        self._status.is_open = True
-        self._status.stale = False
-        self._status.read_ms = 0.0
         #: Fresh connection: forget the failure tally so a recovered stream is
         #: not marked lost again after a single hiccup.
         self._consecutive_failures = 0
@@ -593,13 +685,19 @@ class CaptureWorker:
             reported = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         except Exception:  # noqa: BLE001
             reported = 0.0
-        self._status.stream_fps = reported if 0.0 < reported < 240.0 else 0.0
+        stream_fps = reported if 0.0 < reported < 240.0 else 0.0
+        self._update_status(
+            is_open=True,
+            stale=False,
+            read_ms=0.0,
+            stream_fps=stream_fps,
+        )
         self._set_error(None)
         self.log.info(
             "Đã mở camera %s (%s%s)",
             self.camera_id,
-            self._status.source_desc,
-            f", nguồn báo {self._status.stream_fps:.0f} fps" if self._status.stream_fps else "",
+            self._status_snapshot().source_desc,
+            f", nguồn báo {stream_fps:.0f} fps" if stream_fps else "",
         )
         self._emit_status()
         return True
@@ -736,6 +834,7 @@ class CaptureWorker:
         return cv2.VideoCapture()  # placeholder, never read from
 
     def _close_capture(self) -> None:
+        """Đóng và bỏ handle hiện tại; an toàn khi ``_cap`` đã là ``None``."""
         cap, self._cap = self._cap, None
         if cap is not None:
             try:
@@ -749,14 +848,14 @@ class CaptureWorker:
         moment = time.monotonic() if now is None else now
         with self._lock:
             packet = self._latest
-        if packet is None or not self._status.connected:
+        if packet is None or not self._status_snapshot().connected:
             return False
         if packet.age(moment) > self.camera.stale_after_s:
-            self._status.stale = True
             self._mark_lost(
                 f"Luồng treo quá {self.camera.stale_after_s:.0f}s",
                 "Kết nối camera bị treo — đang tự kết nối lại.",
             )
+            self._update_status(stale=True)
             return True
         return False
 
