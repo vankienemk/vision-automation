@@ -155,6 +155,8 @@ class CameraRuntimeState:
     motion_static: bool = False
     effective_detect_fps: float = 0.0
     lost_handled: bool = False
+    frame_age_ms: float = 0.0
+    sampled_frame: bool = True
 
 
 MEDIAMTX_LOOPBACK_CONFIG = """\
@@ -453,6 +455,7 @@ class Runtime:
             self.config.mqtt,
             logger=self.log.getChild("mqtt"),
             on_event=lambda event: self._on_mqtt_event(event),
+            on_manual_override=self.notify_manual_override,
         )
         self.detector_enabled = enable_detector
         self._cameras: dict[str, CameraRuntimeState] = {}
@@ -477,6 +480,11 @@ class Runtime:
         self._log_handler: logging.Handler | None = None
         self._webcam_requested = with_webcam
         self._lock = threading.RLock()
+        # Chẩn đoán: lỗi suy luận theo camera + nhật ký quyết định gần nhất.
+        self._infer_errors: dict[str, int] = {}
+        self._infer_consecutive_errors: dict[str, int] = {}
+        self._infer_last_error: dict[str, str] = {}
+        self._decisions: deque[dict[str, Any]] = deque(maxlen=80)
 
     # -- accessors -------------------------------------------------------- #
     @property
@@ -538,6 +546,7 @@ class Runtime:
     def start(self) -> None:
         self._install_log_handler()
         self.log.info("Khởi động vision-automation (cấu hình %s)", self.config_manager.path)
+        self._sync_override_topics()
         self._rebuild_engines()
         self.simulator.bind_engines(lambda: self._zone_engines)
 
@@ -616,6 +625,24 @@ class Runtime:
         self.log.info("Đã dừng")
 
     # -- engine wiring ---------------------------------------------------- #
+    def _sync_override_topics(self) -> None:
+        """Bảng ``state_topic -> zone_ref`` cho tính năng "tạm dừng khi chỉnh tay".
+
+        Trước đây ``manual_override`` có trong config nhưng KHÔNG được nối: bấm
+        công tắc tường thì app vẫn ghi đè. Nay mỗi ``manual_override.state_topic``
+        của kịch bản được subscribe và chuyển thành lệnh tạm dừng.
+        """
+        mapping: dict[str, str] = {}
+        for scenario in self.config.scenarios:
+            override = scenario.manual_override
+            if override is None or not override.state_topic:
+                continue
+            mapping[override.state_topic] = scenario.zone
+        try:
+            self.mqtt.set_override_topics(mapping)
+        except Exception:  # noqa: BLE001 - không được làm hỏng hot reload
+            self.log.warning("Không đặt được topic theo dõi chỉnh tay", exc_info=True)
+
     def _rebuild_engines(self) -> None:
         engines: dict[str, ZoneEngine] = {}
         for camera in self.config.cameras:
@@ -738,6 +765,19 @@ class Runtime:
                 last_infer = now_real
                 last_seq = packet.seq
 
+                # Khung hình đã cũ (suy luận chậm/trễ nhịp) thì BỎ, chờ khung mới:
+                # nếu không, một khung vài giây trước sẽ được coi là "bây giờ".
+                frame_age = packet.age()
+                if frame_age > max(0.5, 2.0 / detect_fps):
+                    self.log.debug(
+                        "Bỏ khung cũ %.2fs của %s (chậm hơn nhịp %.1f fps)",
+                        frame_age,
+                        camera_id,
+                        detect_fps,
+                    )
+                    self._pause(stop_event, 0.02)
+                    continue
+
                 detections: list[Detection] = []
                 frame = packet.frame
                 offset_x = offset_y = 0
@@ -751,17 +791,47 @@ class Runtime:
                         frame = packet.frame[y1:y2, x1:x2]
                         offset_x, offset_y = x1, y1
                 started = time.perf_counter()
+                # ``sampled`` = khung hình này CÓ kết quả suy luận đáng tin. Khi
+                # model lỗi/chưa sẵn sàng, danh sách rỗng KHÔNG được hiểu là
+                # "phòng không có ai" — nếu không đèn sẽ tắt oan sau exit_grace_s.
+                sampled = True
                 try:
-                    detections = self.detector.detect(frame) if self.detector else []
-                    if offset_x or offset_y:
-                        detections = [shift_detection(d, offset_x, offset_y) for d in detections]
+                    if self.detector is None or not getattr(self.detector, "available", True):
+                        detections = []
+                        sampled = False
+                    else:
+                        # Ngưỡng gửi xuống model phải là ngưỡng THẤP NHẤT mà một
+                        # vùng có thể cần; nếu chỉ dùng ngưỡng chung thì kéo
+                        # "độ tin cậy tối thiểu" của vùng xuống thấp hơn sẽ
+                        # KHÔNG có tác dụng (box đã bị model lọc mất trước đó).
+                        zone_floor = [
+                            zone.min_confidence
+                            for zone in camera.zones
+                            if zone.enabled and zone.min_confidence is not None
+                        ]
+                        conf_hint = self.config.detector.min_confidence
+                        if zone_floor:
+                            conf_hint = min(conf_hint, *zone_floor)
+                        detections = self.detector.detect(frame, confidence=conf_hint)
+                        if offset_x or offset_y:
+                            detections = [shift_detection(d, offset_x, offset_y) for d in detections]
+                        self._infer_consecutive_errors[camera_id] = 0
                 except Exception as exc:  # noqa: BLE001 - never kill the loop
-                    self.log.error("Suy luận lỗi ở %s: %s", camera_id, exc)
-                    self.events.add("error", f"Suy luận lỗi ở {camera_id}: {exc}", level="error")
+                    self.log.error("Suy luận lỗi ở %s: %s", camera_id, exc, exc_info=True)
+                    self.events.add(
+                        "error",
+                        f"Suy luận lỗi ở {camera_id}: {exc} — vùng giữ nguyên trạng thái "
+                        "gần nhất (không coi là vắng)",
+                        level="error",
+                    )
                     detections = []
+                    sampled = False
+                    self._note_inference_error(camera_id, exc)
                 elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-                self._process_detections(camera, packet, detections, elapsed_ms, detect_fps, is_static)
+                self._process_detections(
+                    camera, packet, detections, elapsed_ms, detect_fps, is_static, sampled=sampled
+                )
                 fps_marks.append(time.monotonic())
             except Exception:  # noqa: BLE001 - a detector hiccup must not kill the thread
                 self.log.exception("Luồng suy luận %s lỗi — tự thử lại sau 1s", camera_id)
@@ -773,6 +843,45 @@ class Runtime:
                 self._stop.wait(1.0)
 
         self.log.info("Luồng suy luận %s kết thúc", camera_id)
+
+    def _note_inference_error(self, camera_id: str, exc: BaseException) -> None:
+        """Ghi nhận lỗi suy luận (để hiện trên bảng chẩn đoán)."""
+        with self._cameras_lock:
+            self._infer_errors[camera_id] = self._infer_errors.get(camera_id, 0) + 1
+            self._infer_consecutive_errors[camera_id] = (
+                self._infer_consecutive_errors.get(camera_id, 0) + 1
+            )
+            self._infer_last_error[camera_id] = f"{type(exc).__name__}: {exc}"[:400]
+
+    def _record_decision(self, **payload: Any) -> None:
+        """Lưu một dòng "vì sao app quyết định như vậy" cho UI (mục Giải thích quyết định)."""
+        entry = {"ts": time.time(), "time": _iso(time.time())}
+        entry.update(payload)
+        with self._cameras_lock:
+            self._decisions.append(entry)
+
+    def decisions(self, limit: int = 30) -> list[dict[str, Any]]:
+        with self._cameras_lock:
+            return list(self._decisions)[-limit:]
+
+    def notify_manual_override(self, zone_ref: str) -> None:
+        """Người dùng vừa chỉnh tay thiết bị → tạm dừng tự động cho vùng đó."""
+        self.scenario_engine.notify_manual_override(zone_ref)
+        pause = max(
+            (runner.status().get("paused_remaining_s", 0.0) for runner in self.scenario_engine.runners()),
+            default=0.0,
+        )
+        if pause:
+            self.events.add(
+                "info",
+                f"Phát hiện chỉnh tay ở {zone_ref} — tạm dừng tự động {pause:.0f}s",
+                zone=zone_ref,
+            )
+            self._record_decision(
+                kind="manual_override",
+                message=f"Thấy thiết bị của {zone_ref} bị chỉnh tay → tạm dừng kịch bản {pause:.0f}s",
+                zone=zone_ref,
+            )
 
     def _camera_is_vacant(self, camera_id: str) -> bool:
         with self._cameras_lock:
@@ -789,12 +898,16 @@ class Runtime:
         elapsed_ms: float,
         detect_fps: float,
         is_static: bool,
+        *,
+        sampled: bool = True,
     ) -> None:
         engine = self._zone_engines.get(camera.id)
         if engine is None:
             return
         now = self.clock.now()
-        states, changes = engine.transitions(now, detections, packet.width, packet.height)
+        states, changes = engine.transitions(
+            now, detections, packet.width, packet.height, sample=sampled
+        )
 
         with self._cameras_lock:
             state = self._cameras.setdefault(camera.id, CameraRuntimeState(camera_id=camera.id))
@@ -806,6 +919,8 @@ class Runtime:
             state.motion_static = is_static
             state.effective_detect_fps = detect_fps
             state.last_frame_seq = packet.seq
+            state.frame_age_ms = packet.age() * 1000.0
+            state.sampled_frame = sampled
             state.zones = {zone_state.zone_id: zone_state for zone_state in states}
 
         marks = self._infer_marks.setdefault(camera.id, deque(maxlen=20))
@@ -815,16 +930,20 @@ class Runtime:
             with self._cameras_lock:
                 self._cameras[camera.id].infer_fps = (len(marks) - 1) / span if span > 0 else 0.0
 
-        self._feed_zone_states(camera, states)
+        self._feed_zone_states(camera, states, sampled=sampled)
 
     # -- commands --------------------------------------------------------- #
-    def _feed_zone_states(self, camera: CameraConfig, states: Iterable[ZoneState]) -> None:
+    def _feed_zone_states(
+        self, camera: CameraConfig, states: Iterable[ZoneState], *, sampled: bool = True
+    ) -> None:
         """Emit events, feed the scenario engine and publish retained state."""
         for zone_state in states:
-            self._emit_zone_event(zone_state)
-            for command in self.scenario_engine.on_zone_state(zone_state):
+            if sampled:
+                self._emit_zone_event(zone_state)
+            for command in self.scenario_engine.on_zone_state(zone_state, sampled=sampled):
                 self._publish_command(command, camera)
-            self._publish_zone_state(camera, zone_state)
+            if sampled:
+                self._publish_zone_state(camera, zone_state)
 
     def _emit_zone_event(self, zone_state: ZoneState) -> None:
         ref = zone_state.ref
@@ -883,11 +1002,24 @@ class Runtime:
                 payload,
                 qos=action.qos,
                 retain=action.retain,
-                key=f"scenario:{command.scenario_id}",
+                key=f"scenario:{command.scenario_id}:{topic}",
                 scenario_id=command.scenario_id,
                 context=command.context,
             )
         rendered = _short_payload(payload)
+        self._record_decision(
+            kind="command",
+            message=(
+                f"{'[DRY-RUN] ' if dry_run else ''}Gửi “{command.step_label or command.trigger}” tới {topic} "
+                f"vì {_trigger_reason(command)}"
+            ),
+            zone=command.zone_ref,
+            scenario=command.scenario_id,
+            topic=topic,
+            payload=payload,
+            ok=ok or dry_run,
+            dry_run=dry_run,
+        )
         self.events.add(
             "command",
             f"{'[DRY-RUN] ' if dry_run else ''}{scenario.name if scenario else command.scenario_id} → {topic} {rendered}",
@@ -985,6 +1117,12 @@ class Runtime:
             previous = last_status.get(camera.id)
             last_status[camera.id] = healthy
             if previous is None:
+                # Lần quan sát ĐẦU TIÊN: coi như lúc khởi động camera đang khoẻ.
+                # Nếu không, một camera hỏng sẵn từ lúc bật app sẽ không bao giờ
+                # sinh chuyển trạng thái ⇒ on_camera_lost (kể cả publish_custom)
+                # không chạy.
+                if not healthy:
+                    self._on_camera_lost(camera)
                 continue
             if previous and not healthy:
                 self._on_camera_lost(camera)
@@ -1005,6 +1143,9 @@ class Runtime:
                 engine.force_zone(zone.id, False, 0)
                 forced.add(zone.id)
             self.events.add("camera", f"Camera {camera.name} mất: coi như vùng trống (fail-safe)")
+            # Áp dụng NGAY thay vì đợi nhịp điều khiển kế tiếp: fail-safe phải
+            # tất định (và nhờ vậy không phụ thuộc thời điểm camera mất).
+            self._propagate_forced_states()
         elif policy == "publish_custom" and camera.on_camera_lost_publish:
             now = time.time()
             if now - self._last_custom_loss.get(camera.id, 0.0) < 5.0:
@@ -1086,6 +1227,7 @@ class Runtime:
         step("camera", lambda: self._sync_capture(new))
         step("suy luận", lambda: self._sync_inference(new))
         step("kịch bản", lambda: self.scenario_engine.reconfigure(new.scenarios))
+        step("chỉnh tay", self._sync_override_topics)
         step("giả lập", lambda: self.simulator.bind_engines(lambda: self._zone_engines))
         self.events.add("config", "Đã áp dụng cấu hình — không cần khởi động lại")
 
@@ -1452,6 +1594,106 @@ class Runtime:
             "setup_completed": self.config.setup_completed,
             "platform": self.platform_info(),
             "shutdown_requested": self.shutdown_requested,
+            "diagnostics": self.diagnostics(),
+            "warnings": self.config.topic_warnings(),
+        }
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Số liệu "sức khoẻ" cho bảng chẩn đoán trên UI.
+
+        Mục đích: mỗi khi có cảm giác "hệ thống chạy sai", người dùng mở tab
+        Chẩn đoán là thấy ngay khung hình cũ bao nhiêu ms, suy luận chạy bao
+        nhiêu fps, model có lỗi gì, MQTT có hàng đợi hay không, và vì sao vùng
+        đang ở trạng thái đó.
+        """
+        with self._cameras_lock:
+            camera_rows: dict[str, Any] = {}
+            for camera in self.config.cameras:
+                worker = self.capture.get(camera.id)
+                status: dict[str, Any] = {}
+                if worker is not None:
+                    raw = worker.status()
+                    status = raw.as_dict() if hasattr(raw, "as_dict") else dict(raw or {})
+                state = self._cameras.get(camera.id)
+                infer_age = (
+                    round(time.time() - state.last_infer_at, 1)
+                    if state is not None and state.last_infer_at
+                    else None
+                )
+                camera_rows[camera.id] = {
+                    "enabled": camera.enabled,
+                    "source": camera.source,
+                    "connected": bool(status.get("connected")),
+                    "is_open": bool(status.get("is_open")),
+                    "stale": bool(status.get("stale")),
+                    "error": status.get("error"),
+                    "hint": status.get("hint"),
+                    "capture_fps": round(float(status.get("capture_fps") or 0.0), 1),
+                    "stream_fps": round(float(status.get("stream_fps") or 0.0), 1),
+                    "read_ms": round(float(status.get("read_ms") or 0.0), 1),
+                    "frame_age_ms": round(float(status.get("frame_age_ms") or 0.0), 1),
+                    "reconnects": int(status.get("reconnects") or 0),
+                    "inference_ms": round(state.inference_ms, 1) if state else None,
+                    "infer_fps": round(state.infer_fps, 1) if state else None,
+                    "detect_fps_target": round(state.effective_detect_fps, 1) if state else None,
+                    "infer_age_s": infer_age,
+                    "sampled_frame": bool(state.sampled_frame) if state else None,
+                    "inference_errors": int(self._infer_errors.get(camera.id, 0)),
+                    "inference_errors_consecutive": int(
+                        self._infer_consecutive_errors.get(camera.id, 0)
+                    ),
+                    "inference_last_error": self._infer_last_error.get(camera.id),
+                    "zones": {
+                        zone_id: {
+                            "occupied": zone_state.occupied,
+                            "count": zone_state.count,
+                            "pending_exit_s": zone_state.pending_exit,
+                            "forced": zone_state.forced,
+                            "since": _iso(_wall_from_monotonic(self.clock, zone_state.since)),
+                        }
+                        for zone_id, zone_state in (state.zones.items() if state else [])
+                    },
+                }
+            threads = {
+                "control": self._control_thread.is_alive() if self._control_thread else False,
+                "inference": {cid: thread.is_alive() for cid, thread in self._infer_threads.items()},
+                "capture": {
+                    camera.id: bool((self.capture.get(camera.id) or None) is not None)
+                    for camera in self.config.cameras
+                },
+                "uvicorn": "main" if self._stop.is_set() else "running",
+            }
+            mqtt_status = self.mqtt.status()
+        detector_info = self.detector.info() if self.detector else {}
+        return {
+            "generated_at": time.time(),
+            "cameras": camera_rows,
+            "threads": threads,
+            "detector": {
+                "name": (detector_info.get("name") if self.detector else None),
+                "available": bool(detector_info.get("available")),
+                "device": detector_info.get("device"),
+                "stats": detector_info.get("stats", {}),
+                "errors_total": sum(self._infer_errors.values()),
+            },
+            "mqtt": {
+                "connected": mqtt_status.get("connected"),
+                "queued": mqtt_status.get("pending") or mqtt_status.get("queued") or 0,
+                "sent": mqtt_status.get("sent"),
+                "received": mqtt_status.get("received"),
+                "dry_run": mqtt_status.get("dry_run"),
+            },
+            "scenarios": [
+                {
+                    "id": row.get("id"),
+                    "reason": row.get("reason"),
+                    "pending": row.get("pending"),
+                    "vacant_retry_in_s": row.get("vacant_retry_in_s"),
+                }
+                for row in self.scenario_engine.status()
+            ],
+            "decisions": self.decisions(30),
+            "warnings": self.config.topic_warnings(),
         }
 
     def webcams(self, *, max_age: float = 30.0) -> list[dict]:
@@ -1638,9 +1880,42 @@ class _MonotonicClock:
         return time.monotonic()
 
 
+def _trigger_reason(command: CommandRequest) -> str:
+    """Câu giải thích ngắn: lệnh này được gửi vì lý do gì."""
+    trigger = command.trigger
+    context = command.context or {}
+    count = context.get("count", 0)
+    zone_name = command.zone_name or command.zone_id or command.zone_ref
+    if trigger.startswith("test:"):
+        return f"bạn bấm “Gửi thử” ở điều kiện {trigger.split(':', 1)[1]} (vùng “{zone_name}”)"
+    if trigger == "enter":
+        return f"vùng “{zone_name}” vừa có người vào (đếm {count})"
+    if trigger == "vacant":
+        return f"vùng “{zone_name}” đã trống đủ thời gian chờ rời vùng"
+    if trigger == "dwell":
+        return f"có người đứng liên tục trong vùng “{zone_name}”"
+    if trigger in ("count_ge", "count_le"):
+        return f"số người trong vùng “{zone_name}” hiện là {count}"
+    if trigger == "class_present":
+        return f"có đúng lớp đối tượng cần tìm trong vùng “{zone_name}”"
+    return f"điều kiện {trigger} của vùng “{zone_name}” được thoả"
+
+
 def _short_payload(payload: Any, limit: int = 120) -> str:
     text = payload if isinstance(payload, str) else str(payload)
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _wall_from_monotonic(clock: Any, value: float | None) -> float | None:
+    """Đổi mốc trên đồng hồ monotonic (của engine) sang giờ thực để hiển thị."""
+    if value is None:
+        return None
+    try:
+        base = getattr(clock, "base", None)
+        now_mono = base.now() if base is not None else time.monotonic()
+        return time.time() - (now_mono - value)
+    except Exception:  # noqa: BLE001 - chỉ để hiển thị
+        return None
 
 
 def _iso(ts: float | None) -> str | None:

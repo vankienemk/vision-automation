@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -389,11 +390,13 @@ def create_app(runtime: Runtime) -> FastAPI:
         if renames:
             message += " · đã cập nhật kịch bản theo mã vùng mới"
         runtime.events.add("config", message)
+        warnings = _polygon_warnings(zones)
         return JSONResponse(
             {
                 "ok": True,
                 "renamed": renames,
                 "dropped_scenarios": [item["scenario_id"] for item in orphans] if drop_orphans else [],
+                "warnings": warnings,
             }
         )
 
@@ -548,8 +551,14 @@ def create_app(runtime: Runtime) -> FastAPI:
         worker = runtime.capture.get(camera_id)
         if worker is None:
             raise HTTPException(status_code=404, detail="Không thấy camera")
-        watcher = f"mjpeg:{camera_id}:{id(worker)}"
-        worker.add_watcher(watcher)
+        # Mỗi client một khoá RIÊNG: trước đây hai tab dùng chung khoá nên đóng
+        # một tab là camera bị nhả cho cả hai (webcam tắt đèn oan).
+        add_auto = getattr(worker, "add_watcher_auto", None)
+        if callable(add_auto):
+            watcher = add_auto(f"mjpeg:{camera_id}")
+        else:  # pragma: no cover - tương thích bản cũ
+            watcher = f"mjpeg:{camera_id}:{uuid.uuid4().hex}"
+            worker.add_watcher(watcher)
         web = runtime.config.web
 
         async def frames() -> AsyncIterator[bytes]:
@@ -570,7 +579,11 @@ def create_app(runtime: Runtime) -> FastAPI:
             except asyncio.CancelledError:  # client navigated away
                 raise
             finally:
-                worker.remove_watcher(watcher)
+                remove_auto = getattr(worker, "remove_watcher_auto", None)
+                if callable(remove_auto):
+                    remove_auto(watcher)
+                else:  # pragma: no cover - tương thích bản cũ
+                    worker.remove_watcher(watcher)
 
         return StreamingResponse(
             frames(),
@@ -591,7 +604,9 @@ def create_app(runtime: Runtime) -> FastAPI:
                 folder = Path(web.snapshot_dir)
                 folder.mkdir(parents=True, exist_ok=True)
                 stamp = time.strftime("%Y%m%d-%H%M%S")
-                (folder / f"{camera_id}-{stamp}.jpg").write_bytes(data)
+                target = folder / f"{camera_id}-{stamp}.jpg"
+                target.write_bytes(data)
+                _prune_snapshots(folder, camera_id)
             except Exception:  # noqa: BLE001 - saving is a convenience, never fatal
                 LOGGER.debug("Không lưu được snapshot", exc_info=True)
         return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
@@ -650,6 +665,61 @@ def create_app(runtime: Runtime) -> FastAPI:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     return app
+
+
+SNAPSHOT_KEEP = 50  # số ảnh chụp giữ lại cho mỗi camera
+
+
+def _prune_snapshots(folder: Path, camera_id: str, keep: int = SNAPSHOT_KEEP) -> None:
+    """Giữ tối đa ``keep`` ảnh mới nhất của mỗi camera (tránh đầy ổ đĩa)."""
+    try:
+        files = sorted(
+            (item for item in folder.glob(f"{camera_id}-*.jpg") if item.is_file()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in files[keep:]:
+            try:
+                stale.unlink()
+            except OSError:
+                continue
+    except OSError:
+        LOGGER.debug("Không dọn được snapshot cũ", exc_info=True)
+
+
+def _polygon_warnings(zones: list[dict]) -> list[str]:
+    """Cảnh báo hình học cho các vùng vừa lưu (vùng tự cắt nhau)."""
+    warnings: list[str] = []
+    for zone in zones:
+        polygon = zone.get("polygon") or []
+        if len(polygon) < 4:
+            continue
+        if _self_intersects(polygon):
+            warnings.append(
+                f"Vùng “{zone.get('name') or zone.get('id')}” bị TỰ CẮT NHAU (các cạnh cắt chéo) — "
+                "kết quả 'trong vùng' sẽ không chính xác. Hãy sửa lại thứ tự các điểm."
+            )
+    return warnings
+
+
+def _self_intersects(points: list) -> bool:
+    def cross(o, p, q) -> float:
+        return (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0])
+
+    count = len(points)
+    for i in range(count):
+        a1, a2 = points[i], points[(i + 1) % count]
+        for j in range(i + 1, count):
+            if j == i or (j + 1) % count == i or (i + 1) % count == j:
+                continue
+            b1, b2 = points[j], points[(j + 1) % count]
+            d1, d2 = cross(b1, b2, a1), cross(b1, b2, a2)
+            d3, d4 = cross(a1, a2, b1), cross(a1, a2, b2)
+            if ((d1 > 1e-12 and d2 < -1e-12) or (d1 < -1e-12 and d2 > 1e-12)) and (
+                (d3 > 1e-12 and d4 < -1e-12) or (d3 < -1e-12 and d4 > 1e-12)
+            ):
+                return True
+    return False
 
 
 def _render_jpeg(

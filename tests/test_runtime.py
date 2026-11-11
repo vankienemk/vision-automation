@@ -19,6 +19,7 @@ from app.config import (
     save_config,
 )
 from app.detection import Box, Detection
+from app.capture import FramePacket
 from app.detector import NullDetector, YoloDetector, build_detector, resolve_device
 from app.runtime import Runtime
 
@@ -460,3 +461,59 @@ def test_sync_inference_stops_threads_of_removed_cameras(image_path, tmp_path) -
         assert "cam_anh" not in runtime._infer_threads
     finally:
         runtime.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Hồi quy: lỗi suy luận KHÔNG được biến thành "vùng trống" (tắt đèn oan)
+# --------------------------------------------------------------------------- #
+def test_inference_failure_does_not_make_zone_vacant(image_path, tmp_path) -> None:
+    runtime = make_runtime(image_path, tmp_path)
+
+    class BrokenDetector:
+        name = "broken"
+        available = True
+
+        def class_names(self) -> dict[int, str]:
+            return {0: "person"}
+
+        def detect(self, frame, *, confidence=None):  # noqa: ANN001
+            raise RuntimeError("model hỏng")
+
+        def info(self) -> dict:
+            return {"name": "broken", "available": True, "device": "cpu"}
+
+        def close(self) -> None:
+            return None
+
+    runtime.detector = BrokenDetector()
+    runtime._rebuild_engines()  # noqa: SLF001 - dựng engine cho camera như lúc start()
+    camera = runtime.config.cameras[0]
+    engine = runtime._zone_engines[camera.id]  # noqa: SLF001
+    zone_id = camera.zones[0].id
+
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    packet = FramePacket(seq=1, frame=frame, captured_at=0.0, wall_time=0.0, width=320, height=240)
+
+    # Người đang ở trong vùng (đã xác nhận bằng các khung trước đó).
+    engine.force_zone(zone_id, True, 1)
+    assert engine.evaluate(0.0, [], 320, 240)[0].occupied is True
+
+    runtime._process_detections(  # noqa: SLF001
+        camera, packet, [], 10.0, 4.0, False, sampled=False
+    )
+    state = runtime._cameras[camera.id].zones[zone_id]  # noqa: SLF001
+    assert state.occupied is True, "lỗi suy luận bị hiểu thành 'không có ai'"
+    diagnostics = runtime.diagnostics()
+    assert diagnostics["cameras"][camera.id]["sampled_frame"] is False
+
+
+def test_diagnostics_reports_reasons_and_counters(image_path, tmp_path) -> None:
+    runtime = make_runtime(image_path, tmp_path)
+    runtime._note_inference_error("cam_anh", RuntimeError("CUDA out of memory"))  # noqa: SLF001
+    diagnostics = runtime.diagnostics()
+    camera_row = diagnostics["cameras"]["cam_anh"]
+    assert camera_row["inference_errors"] == 1
+    assert "CUDA out of memory" in (camera_row["inference_last_error"] or "")
+    assert diagnostics["scenarios"], "phải có 'reason' cho từng kịch bản"
+    assert all("reason" in row and row["reason"] for row in diagnostics["scenarios"])
+    assert "cameras" in diagnostics and "decisions" in diagnostics and "warnings" in diagnostics
