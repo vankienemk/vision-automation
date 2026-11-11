@@ -13,6 +13,7 @@ first line of defence against blinking lights.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -226,10 +227,19 @@ class PresenceTracker:
         self.exit_grace_s = max(0.0, exit_grace_s)
         self._window = deque(window[-self.of :], maxlen=self.of)
 
-    def update(self, now: float, counts: ZoneCounts) -> tuple[bool | None, bool]:
-        """Feed one frame. Returns ``(occupied, changed)``."""
+    def update(self, now: float, counts: ZoneCounts, *, sample: bool = True) -> tuple[bool | None, bool]:
+        """Feed one frame. Returns ``(occupied, changed)``.
+
+        ``sample=False`` dùng khi suy luận lỗi/không có kết quả — không được coi là
+        "không có ai". Khi đó khung hình không được đưa vào cửa sổ bỏ phiếu và
+        cũng không mở/đẩy mốc chờ rời phòng; chỉ số đếm thô được cập nhật, còn
+        trạng thái ``occupied`` giữ nguyên (kèm ``changed=False``).
+        """
         self.count = counts.total
         self.class_counts = dict(counts.class_counts)
+        if not sample:
+            # Không có kết quả suy luận ≠ vắng người: đứng yên, không bỏ phiếu.
+            return self.occupied, False
         present = counts.total > 0
         self._window.append(present)
         votes = sum(self._window)
@@ -261,6 +271,14 @@ class PresenceTracker:
                 self.since = now
                 self._vacant_candidate_since = None
                 return self.occupied, True
+
+        # Rơi tới đây với votes >= frames mà vẫn đang occupied nghĩa là phiếu bầu
+        # đã "khoẻ" trở lại sau một cú tụt (người trong phòng hiện lại trong
+        # khung hình). Phải XOÁ mốc chờ rời phòng, nếu không cú tụt kế tiếp sẽ
+        # dùng lại mốc cũ và rời phòng ngay lập tức — bỏ qua exit_grace_s, đèn
+        # tắt sớm rồi bật lại (nhấp nháy) dù người vẫn còn trong phòng.
+        if votes >= self.frames:
+            self._vacant_candidate_since = None
         return self.occupied, False
 
     def force(self, now: float, occupied: bool, count: int, class_counts: dict[str, int] | None = None) -> tuple[bool | None, bool]:
@@ -285,6 +303,10 @@ class ZoneEngine:
     """Evaluates every zone of one camera against the current detections."""
 
     def __init__(self, camera_id: str, zones: Sequence[ZoneConfig], global_min_confidence: float) -> None:
+        # Khoá bảo vệ trạng thái: engine bị sửa từ thread asyncio (mô phỏng qua
+        # /api/simulate, hot-reload) trong khi thread suy luận đang đánh giá và
+        # thread điều khiển đang chạy evaluate_forced.
+        self._lock = threading.RLock()
         self.camera_id = camera_id
         self.global_min_confidence = global_min_confidence
         self._zones: dict[str, ZoneConfig] = {}
@@ -350,12 +372,32 @@ class ZoneEngine:
         detections: Sequence[Detection],
         frame_width: int,
         frame_height: int,
+        *,
+        sample: bool = True,
     ) -> list[ZoneState]:
-        """Return the state of every zone, in config order."""
+        """Return the state of every zone, in config order.
+
+        ``sample=False`` dùng khi suy luận lỗi/không có kết quả — không được coi là
+        "không có ai": danh sách detection rỗng khi đó KHÔNG được đưa vào cửa sổ
+        bỏ phiếu (xem :meth:`PresenceTracker.update`).
+        """
         states: list[ZoneState] = []
         for zone_id, zone in self._zones.items():
             state = self._states[zone_id]
             if not zone.enabled:
+                # Zone đang tắt thì không được đánh giá: xoá sạch trạng thái cũ.
+                # Nếu không, ``updated_at = now`` sẽ khiến UI hiển thị một trạng
+                # thái "tươi" cho zone không ai đánh giá, và khi bật lại thì cửa
+                # sổ bỏ phiếu cũ bị dùng lại (người đã đi vẫn bị coi là còn).
+                tracker = self._trackers[zone_id]
+                tracker.reset()
+                state.occupied = None
+                state.count = 0
+                state.class_counts = {}
+                state.detections = []
+                state.since = None
+                state.pending_exit = None
+                state.forced = False
                 state.updated_at = now
                 states.append(state)
                 continue
@@ -370,7 +412,7 @@ class ZoneEngine:
                 state.detections = []
             else:
                 previous = tracker.occupied
-                occupied, changed = tracker.update(now, counts)
+                occupied, changed = tracker.update(now, counts, sample=sample)
                 state.count = counts.total
                 state.class_counts = counts.class_counts
                 state.forced = False
@@ -418,10 +460,16 @@ class ZoneEngine:
         detections: Sequence[Detection],
         frame_width: int,
         frame_height: int,
+        *,
+        sample: bool = True,
     ) -> tuple[list[ZoneState], list[tuple[ZoneState, bool]]]:
-        """Evaluate and also report which zones changed state this frame."""
+        """Evaluate and also report which zones changed state this frame.
+
+        ``sample=False`` dùng khi suy luận lỗi/không có kết quả — không được coi là
+        "không có ai" (xem :meth:`PresenceTracker.update`).
+        """
         before = {zone_id: state.occupied for zone_id, state in self._states.items()}
-        states = self.evaluate(now, detections, frame_width, frame_height)
+        states = self.evaluate(now, detections, frame_width, frame_height, sample=sample)
         changes: list[tuple[ZoneState, bool]] = []
         for state in states:
             previous = before.get(state.zone_id)

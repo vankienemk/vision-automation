@@ -179,6 +179,39 @@ def test_disabled_zone_never_counts() -> None:
     assert states[0].occupied is None
 
 
+def test_disabled_zone_does_not_freeze_stale_state() -> None:
+    """BUG 2: zone bị tắt phải xoá trạng thái cũ, không được giữ số liệu "tươi"."""
+    zone = make_zone(enter_confirm={"frames": 3, "of": 5}, exit_grace_s=10.0)
+    engine = engine_for(zone)
+    now = 0.0
+    for _ in range(5):
+        states = engine.evaluate(now, [det(200, 300, 260, 700)], 1000, 1000)
+        now += 0.2
+    assert states[0].occupied is True
+    assert states[0].count == 1
+
+    engine._zones["z1"].enabled = False  # tắt zone (mutate ZoneConfig đang giữ trong engine)
+    states = engine.evaluate(now, [det(200, 300, 260, 700)], 1000, 1000)
+    assert states[0].occupied is None
+    assert states[0].count == 0
+    assert states[0].class_counts == {}
+    assert states[0].pending_exit is None
+    assert states[0].updated_at == now  # vẫn báo "vừa cập nhật" nhưng trạng thái là unknown
+
+    # bật lại: cửa sổ bỏ phiếu đã bị xoá nên một khung vắng KHÔNG được kết luận ngay
+    engine._zones["z1"].enabled = True
+    for _ in range(5):  # chưa đủ 'of' khung để kết luận, càng không đủ exit_grace_s
+        now += 0.2
+        states = engine.evaluate(now, [], 1000, 1000)
+        assert states[0].occupied is not False, "cửa sổ bỏ phiếu cũ bị dùng lại"
+    # mốc chờ rời phòng chỉ tính từ các khung vắng THẬT sau khi bật lại
+    assert engine._trackers["z1"].pending_exit_s is not None
+    states = engine.evaluate(now + 5.0, [], 1000, 1000)
+    assert states[0].occupied is None  # chưa đủ 10 s vắng liên tục
+    states = engine.evaluate(now + 11.0, [], 1000, 1000)
+    assert states[0].occupied is False  # đủ 10 s mới rời phòng
+
+
 # --------------------------------------------------------------------------- #
 # presence voting / grace
 # --------------------------------------------------------------------------- #
@@ -235,6 +268,100 @@ def test_flickering_detection_never_blinks() -> None:
         tracker.update(now, counts(det(0, 0, 10, 10)) if index % 2 == 0 else counts())
         now += 0.25
     assert tracker.occupied is True  # votes stay >= 3 of 5
+
+
+def test_recovery_clears_the_exit_grace_timestamp() -> None:
+    """BUG 1: mốc chờ rời phòng phải được xoá khi phiếu bầu "khoẻ" trở lại.
+
+    Nếu mốc cũ còn sót, cú tụt phiếu kế tiếp sẽ rời phòng NGAY (bỏ qua
+    exit_grace_s) → đèn tắt sớm rồi bật lại = nhấp nháy.
+    """
+    tracker = PresenceTracker(frames=3, of=5, exit_grace_s=10.0)
+    now = 0.0
+    for _ in range(5):
+        tracker.update(now, counts(det(0, 0, 10, 10)))
+        now += 0.2
+    assert tracker.occupied is True
+
+    # 3 khung vắng mở mốc chờ rời phòng, nhưng chưa đủ 10 s
+    for _ in range(3):
+        occupied, changed = tracker.update(now, counts())
+        now += 0.2
+        assert (occupied, changed) == (True, False)
+    assert tracker.pending_exit_s is not None
+
+    # người trong phòng hiện lại → cửa sổ bỏ phiếu khoẻ lại
+    for _ in range(5):
+        occupied, changed = tracker.update(now, counts(det(0, 0, 10, 10)))
+        now += 0.2
+        assert (occupied, changed) == (True, False)
+    assert tracker.pending_exit_s is None
+
+    # bỏ qua một quãng dài rồi mới vắng lại: phải đếm lại đủ 10 s liên tục
+    dip_start = now + 11.0
+    dip_now = dip_start
+    for _ in range(3):  # đủ để tụt dưới 3/5 phiếu
+        occupied, changed = tracker.update(dip_now, counts())
+        dip_now += 0.2
+        assert (occupied, changed) == (True, False), "mốc chờ cũ vẫn còn → rời phòng sớm"
+    occupied, changed = tracker.update(dip_start + 9.5, counts())
+    assert (occupied, changed) == (True, False)  # 10 s liên tục chưa trôi hết
+    occupied, changed = tracker.update(dip_start + 10.5, counts())
+    assert (occupied, changed) == (False, True)  # đủ 10 s vắng liên tục mới rời phòng
+
+
+def test_sample_false_is_not_treated_as_nobody_here() -> None:
+    """BUG 3: khung suy luận lỗi (sample=False) không được coi là "không có ai"."""
+    tracker = PresenceTracker(frames=2, of=3, exit_grace_s=5.0)
+    now = 0.0
+    for _ in range(3):
+        tracker.update(now, counts(det(0, 0, 10, 10)))
+        now += 0.2
+    assert tracker.occupied is True
+
+    for _ in range(10):  # suy luận lỗi liên tục: không được đụng vào phiếu bầu
+        now += 0.2
+        occupied, changed = tracker.update(now, counts(), sample=False)
+        assert (occupied, changed) == (True, False)
+    assert tracker.pending_exit_s is None
+    assert tracker.count == 0  # số đếm thô vẫn được cập nhật để UI thấy
+
+    # cửa sổ bỏ phiếu vẫn là 3 phiếu "có người": cần 2 khung vắng thật mới mở mốc chờ
+    occupied, changed = tracker.update(now + 1.0, counts())
+    assert (occupied, changed) == (True, False)
+    assert tracker.pending_exit_s is None
+    occupied, changed = tracker.update(now + 1.2, counts())
+    assert (occupied, changed) == (True, False)
+    assert tracker.pending_exit_s is not None
+
+
+def test_engine_transitions_sample_false_keeps_zone_occupied() -> None:
+    """BUG 3 qua ZoneEngine.transitions(..., sample=False) — API cho runtime."""
+    zone = make_zone(enter_confirm={"frames": 2, "of": 3}, exit_grace_s=0.0)
+    engine = engine_for(zone)
+    now = 0.0
+    for _ in range(3):
+        states = engine.evaluate(now, [det(200, 300, 260, 700)], 1000, 1000)
+        now += 0.2
+    assert states[0].occupied is True
+
+    # exit_grace_s = 0: nếu sample=False bị tính là "không có ai" thì zone tắt ngay
+    for _ in range(5):
+        now += 0.2
+        states, changes = engine.transitions(now, [], 1000, 1000, sample=False)
+        assert states[0].occupied is True
+        assert changes == []
+    assert states[0].count == 0  # chỉ số đếm thô đổi, trạng thái thì không
+    assert states[0].pending_exit is None
+
+    # khung vắng THẬT (sample=True) mới được rời phòng
+    now += 1.0
+    states, changes = engine.transitions(now, [], 1000, 1000)
+    assert states[0].occupied is True
+    now += 1.0
+    states, changes = engine.transitions(now, [], 1000, 1000)
+    assert states[0].occupied is False
+    assert changes and changes[0][1] is False
 
 
 def test_initial_state_is_unknown_then_vacant() -> None:
