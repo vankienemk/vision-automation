@@ -800,7 +800,7 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**269 test**) phủ:
+Bộ test (**270 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
 - **`tests/test_zones.py`** — hình học đa giác, **5 chế độ xác định trong vùng**
@@ -852,7 +852,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 269 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
+├── tests/                  # 270 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
@@ -910,7 +910,7 @@ Bảng dưới là kết quả đo được khi phát triển, không phải suy
 
 | Hạng mục | Kết quả |
 |---|---|
-| `pytest` | **269/269 pass** (~33 s) |
+| `pytest` | **270/270 pass** (~33 s) |
 | RTSP thật `rtsp://192.168.1.50:554/live.sdp` (640×480, nguồn 10 fps) | chạy **> 6 phút liên tục**: `capture_fps 10.0`, `read_ms 110`, **`frame_age_ms 30`** (trước khi sửa: trễ ~3 s, hễ ~20 s lại `Luồng treo quá 10s`), **0** lần treo trong log, `FPS suy luận 4.0` |
 | Sự cố “treo liên tục + trễ 3 s” | hai lỗi gốc: (1) `_on_config_change` ném `IndexError` tại `running = {name.split("-", 1)[1] …}` nên **không bao giờ tạo luồng suy luận** cho camera thêm từ UI; (2) đọc RTSP bị **giới hạn tốc độ theo `fps`** nên khung dư dồn mãi → trễ dần rồi đứng. Đã sửa + thêm 6 test hồi quy |
 | Hot-reload bật/tắt camera đang chạy | `{"value": false}` → `Dừng luồng suy luận live_sdp`; `{"value": true}` → `Luồng suy luận live_sdp bắt đầu`; **không** còn `IndexError` |

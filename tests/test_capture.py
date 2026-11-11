@@ -539,3 +539,20 @@ def test_reopen_requested_during_open_is_not_lost(
 
     # Không xoá mất yêu cầu ⇒ phải mở lại lần nữa dù handle hiện tại vẫn "tốt".
     assert opened["n"] == 2
+
+
+def test_rtsp_failure_hint_points_at_the_check_button():
+    """Lỗi RTSP phải chỉ người dùng tới nút 🔌 Kiểm tra (chẩn đoán chính xác)."""
+    camera = CameraConfig.model_validate(
+        {
+            "id": "cam_rtsp",
+            "name": "RTSP",
+            "source": "rtsp",
+            "url": "rtsp://127.0.0.1:9/khong-co",
+            "zones": [],
+        }
+    )
+    worker = CaptureWorker(camera)
+    hint = worker._open_hint()
+    assert "Kiểm tra" in hint
+    assert "Cài đặt" in hint

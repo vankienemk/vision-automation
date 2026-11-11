@@ -707,7 +707,9 @@ class CaptureWorker:
         if cam.source == "rtsp":
             return (
                 "Không kết nối được RTSP: sai mật khẩu/URL? Kiểm tra IP camera, "
-                "hoặc thử đổi transport sang UDP trong tab Camera."
+                "hoặc thử đổi transport sang UDP trong tab Camera. "
+                "Bấm nút “🔌 Kiểm tra” cạnh camera ở tab Cài đặt để biết chính xác "
+                "đang tắc ở đâu (máy tắt / sai cổng / sai mật khẩu / sai đường dẫn)."
             )
         if cam.source == "webcam":
             status = camera_authorization_status()
