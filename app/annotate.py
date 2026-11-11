@@ -123,7 +123,19 @@ def draw_zones(
     return frame
 
 
-def draw_detections(frame: np.ndarray, detections: Iterable[dict], *, thickness: int = 2) -> np.ndarray:
+def draw_detections(
+    frame: np.ndarray,
+    detections: Iterable[dict],
+    *,
+    thickness: int = 2,
+    show_anchor: bool = True,
+) -> np.ndarray:
+    """Vẽ khung + nhãn, kèm CHẤM NEO (điểm chân) để thấy vì sao vùng không khớp.
+
+    Chấm neo màu xanh khi đối tượng đang được ít nhất một vùng tính (``in_zones``),
+    màu hổ phách khi không vùng nào tính nó — điểm chân nằm ngoài đa giác là
+    nguyên nhân phổ biến nhất của "vùng không hoạt động".
+    """
     for detection in detections:
         box = detection.get("box")
         if not box or len(box) != 4:
@@ -132,6 +144,24 @@ def draw_detections(frame: np.ndarray, detections: Iterable[dict], *, thickness:
         cv2.rectangle(frame, (x1, y1), (x2, y2), COLOR_BOX, thickness)
         label = f"{detection.get('class', '?')} {float(detection.get('confidence', 0)) * 100:.0f}%"
         _put_text(frame, label, (x1 + 2, max(12, y1 - 4)), scale=0.45, color=COLOR_BOX)
+        if not show_anchor:
+            continue
+        anchor = detection.get("anchor")
+        if not anchor or len(anchor) != 2:
+            continue
+        inside = bool(detection.get("in_zones"))
+        color = (74, 222, 128) if inside else (60, 190, 250)   # xanh lá / hổ phách (BGR)
+        ax, ay = int(round(anchor[0])), int(round(anchor[1]))
+        cv2.circle(frame, (ax, ay), 6, color, -1)
+        cv2.circle(frame, (ax, ay), 8, (15, 23, 42), 1)
+        if detection.get("in_zones"):
+            _put_text(
+                frame,
+                "/".join(str(z) for z in detection["in_zones"])[:18],
+                (ax + 10, ay + 4),
+                scale=0.4,
+                color=color,
+            )
     return frame
 
 

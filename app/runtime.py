@@ -1726,14 +1726,29 @@ class Runtime:
         camera = self.config.camera(camera_id)
         with self._cameras_lock:
             state = self._cameras.get(camera_id)
-            detections = [d.as_dict() for d in state.detections] if state else []
+            raw_detections = list(state.detections) if state else []
+            detections = [detection.as_dict() for detection in raw_detections]
             zone_states = (
                 {zone_id: zs.as_dict() for zone_id, zs in state.zones.items()} if state else {}
             )
+            matched_by: dict[int, list[str]] = {id(item): [] for item in raw_detections}
+            if state:
+                for zone_id, zone_state in state.zones.items():
+                    for detection in zone_state.detections:
+                        matched_by.setdefault(id(detection), []).append(zone_id)
             inference = {
                 "ms": round(state.inference_ms, 1) if state else 0.0,
                 "fps": round(state.effective_detect_fps, 1) if state else 0.0,
             }
+        # Điểm neo (điểm chân) + danh sách vùng đang tính đối tượng này: UI vẽ
+        # chấm neo, người dùng thấy ngay "vì sao vùng này không thấy người".
+        for index, raw in enumerate(raw_detections):
+            box = raw.box
+            detections[index]["anchor"] = [
+                round((box.x1 + box.x2) / 2.0, 1),
+                round(box.y2 - (box.y2 - box.y1) * 0.02, 1),
+            ]
+            detections[index]["in_zones"] = list(matched_by.get(id(raw), []))
         return {
             "camera": camera_id,
             "detections": detections,
@@ -1745,6 +1760,9 @@ class Runtime:
                     "color": zone.color,
                     "occupied": (zone_states.get(zone.id) or {}).get("occupied"),
                     "count": (zone_states.get(zone.id) or {}).get("count", 0),
+                    "anchor": zone.anchor,
+                    "overlap_ratio": zone.overlap_ratio,
+                    "analysis": (zone_states.get(zone.id) or {}).get("analysis", {}),
                 }
                 for zone in (camera.zones if camera else [])
                 if zone.enabled

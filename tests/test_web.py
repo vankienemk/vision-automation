@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import cv2
@@ -638,5 +639,36 @@ async def test_zone_save_keeps_shape_chosen_in_ui(tmp_path, image_path):
             assert rejected.status_code == 400
             assert "shape" in rejected.text
             assert [zone.shape for zone in runtime.config.camera("cam_test").zones] == ["rect", "polygon"]
+    finally:
+        runtime.stop()
+
+
+# --------------------------------------------------------------------------- #
+# Mỗi vùng phải kèm "vì sao trống/có người" để UI giải thích cho người dùng
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_state_exposes_zone_analysis(tmp_path, image_path):
+    """Mỗi vùng phải kèm "vì sao trống/có người" để UI giải thích cho người dùng."""
+    runtime = build_runtime(tmp_path, image_path)
+    runtime.start()
+    try:
+        # Runtime không nạp YOLO trong test: gắn detector giả để có kết quả suy luận.
+        runtime.detector = FakeDetector()
+        runtime.detector_enabled = True
+        runtime._start_inference("cam_test")
+        async with client_for(runtime) as client:
+            analysis: dict = {}
+            for _ in range(200):
+                state = await client.get("/api/state")
+                assert state.status_code == 200
+                zone_state = state.json()["cameras"][0]["zone_states"].get("khu_bep") or {}
+                analysis = zone_state.get("analysis") or {}
+                if analysis.get("reason"):
+                    break
+                await asyncio.sleep(0.02)
+            assert analysis, "không có phân tích cho vùng khu_bep"
+            assert analysis["anchor"] == "bottom_center"
+            assert "detections" in analysis
+            assert isinstance(analysis["reason"], str) and analysis["reason"]
     finally:
         runtime.stop()

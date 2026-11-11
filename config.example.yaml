@@ -82,8 +82,16 @@ cameras:
         polygon: [[0.12, 0.35], [0.72, 0.35], [0.78, 0.95], [0.08, 0.95]]
         classes: [person]
         min_confidence: null    # null = dùng min_confidence toàn cục
-        anchor: bottom_center   # bottom_center | center | any_overlap | overlap_ratio
-        overlap_ratio: 0.5      # chỉ dùng khi anchor = overlap_ratio
+        # Cách quyết định một đối tượng "ở trong vùng":
+        #   bottom_center : điểm chân đối tượng (mặc định) — hợp camera nhìn chếch/từ trên
+        #   center        : tâm khung đối tượng
+        #   any_overlap   : chạm vào vùng là tính (nhạy nhất)
+        #   fully_inside  : TOÀN BỘ đối tượng nằm trong vùng (≥98% diện tích)
+        #   inside_ratio  : ≥ overlap_ratio phần trăm diện tích đối tượng nằm trong vùng
+        #                   (hợp camera nhìn gần — chân người bị cắt mép dưới)
+        #   overlap_ratio : tên cũ của inside_ratio (vẫn được chấp nhận)
+        anchor: bottom_center
+        overlap_ratio: 0.5      # 0.05..1.0 — dùng cho inside_ratio / overlap_ratio
         enter_confirm: {frames: 3, of: 5}   # bỏ phiếu 3/5 khung để nhận "có người"
         exit_grace_s: 3         # phải vắng liên tục 3 giây mới coi là trống
         color: "#22c55e"

@@ -295,8 +295,29 @@ class ZoneConfig(_Base):
     shape: Literal["polygon", "rect"] | None = None
     classes: list[str] = Field(default_factory=lambda: ["person"])
     min_confidence: float | None = Field(default=None, ge=0.01, le=1.0)
-    anchor: Literal["bottom_center", "center", "any_overlap", "overlap_ratio"] = "bottom_center"
-    overlap_ratio: float = Field(default=0.5, ge=0.05, le=1.0)
+    anchor: Literal[
+        "bottom_center",
+        "center",
+        "any_overlap",
+        "fully_inside",
+        "inside_ratio",
+        "overlap_ratio",
+    ] = Field(
+        default="bottom_center",
+        description=(
+            "Cách quyết định một đối tượng 'ở trong vùng': "
+            "bottom_center = điểm chân người; center = tâm khung; any_overlap = chạm vùng là tính; "
+            "fully_inside = TOÀN BỘ đối tượng nằm trong vùng; "
+            "inside_ratio = ít nhất overlap_ratio phần trăm diện tích đối tượng nằm trong vùng "
+            "(overlap_ratio là tên cũ, tương đương inside_ratio)"
+        ),
+    )
+    overlap_ratio: float = Field(
+        default=0.5,
+        ge=0.05,
+        le=1.0,
+        description="Ngưỡng % diện tích đối tượng phải nằm trong vùng (dùng cho inside_ratio/overlap_ratio)",
+    )
     enter_confirm: VoteConfig = Field(default_factory=VoteConfig)
     exit_grace_s: float = Field(default=3.0, ge=0, le=3600)
     color: str = "#22c55e"
@@ -351,6 +372,12 @@ class ZoneConfig(_Base):
                 "xác định 'trong vùng'. Hãy vẽ rộng ra hoặc dùng kiểu 'Toàn khung hình'."
             )
         return points
+
+    @model_validator(mode="after")
+    def _check_anchor_ratio(self) -> "ZoneConfig":
+        if self.anchor == "fully_inside" and len(self.polygon) < 3:
+            raise ValueError("anchor 'fully_inside' cần polygon có ít nhất 3 đỉnh.")
+        return self
 
     @field_validator("classes")
     @classmethod

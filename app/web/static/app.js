@@ -436,6 +436,7 @@ function renderLive() {
   }
   const det = (S.state && S.state.detector) || {};
   $('#st-device').textContent = det.device || '–';
+  if (S.tab === 'zones') renderZoneAnalysis();
   const zones = cam.zones || [];
   const occupied = zones.filter((z) => {
     const zs = (cam.zone_states || {})[z.id];
@@ -468,10 +469,23 @@ function renderLive() {
     const state = zs.occupied === true ? 'green' : (zs.occupied === false ? 'gray' : 'amber');
     const label = zs.occupied === true ? ('Có người ×' + (zs.count || 1)) :
       (zs.occupied === false ? 'Trống' : 'Đang xác định…');
-    const since = zs.occupied === true && zs.updated_at ? '' : '';
+    // Khi vùng trống, hiện LUÔN lý do (bao nhiêu đối tượng bị loại và vì sao)
+    // để người dùng biết phải kéo vùng rộng ra hay đổi cách xác định.
+    const analysis = zs.analysis || {};
+    const meta = (zone.classes || []).join(', ');
+    const why = zs.occupied === true ? ''
+      : (analysis.reason ? ' · ' + analysis.reason : '');
+    const detail = zs.occupied === true ? '' :
+      (analysis.detections
+        ? '<span class="zwarn">khung có ' + analysis.detections + ' đối tượng'
+          + (analysis.outside ? ', ' + analysis.outside + ' ngoài vùng' : '')
+          + (analysis.ignored_confidence ? ', ' + analysis.ignored_confidence + ' dưới ngưỡng' : '')
+          + (analysis.ignored_class ? ', ' + analysis.ignored_class + ' khác lớp' : '')
+          + '</span>'
+        : '');
     return '<div class="zone-item"><span class="swatch" style="background:' + escapeHtml(zone.color || '#22c55e') + '"></span>' +
       '<div><div class="zname">' + escapeHtml(zone.name || zone.id) + '</div>' +
-      '<div class="zmeta">' + escapeHtml((zone.classes || []).join(', ')) + since + '</div></div>' +
+      '<div class="zmeta">' + escapeHtml(meta + why) + '</div>' + detail + '</div>' +
       '<div class="zright"><span class="badge ' + state + '">' + label + '</span></div></div>';
   }).join('') : '<p class="small muted">Camera này chưa có vùng nào. Sang tab “Vùng phát hiện” để vẽ.</p>';
 }
@@ -954,7 +968,7 @@ function renderZoneAttrs() {
   const zone = ZE.zones[ZE.active];
   const disabled = !zone;
   ['#zone-name', '#zone-id', '#zone-color', '#zone-anchor', '#zone-conf', '#zone-enabled',
-    '#class-search', '#zone-shape'].forEach((sel) => { $(sel).disabled = disabled; });
+    '#class-search', '#zone-shape', '#zone-ratio'].forEach((sel) => { $(sel).disabled = disabled; });
   if (!zone) {
     $('#zone-name').value = ''; $('#zone-id').value = '';
     $('#class-list').innerHTML = '<p class="small muted">Chưa có vùng.</p>';
@@ -972,13 +986,53 @@ function renderZoneAttrs() {
     : 'Đang cho sửa mã — bấm 🔒 để khoá lại.';
   $('#zone-shape').value = zoneShapeOption(zone);
   $('#zone-color').value = zone.color || '#22c55e';
-  $('#zone-anchor').value = zone.anchor || 'bottom_center';
+  const anchor = zone.anchor === 'overlap_ratio' ? 'inside_ratio' : (zone.anchor || 'bottom_center');
+  $('#zone-anchor').value = anchor;
+  const ratio = Math.round((zone.overlap_ratio == null ? 0.5 : zone.overlap_ratio) * 100);
+  $('#zone-ratio').value = Math.max(5, Math.min(95, ratio));
+  $('#zone-ratio-val').textContent = Math.round($('#zone-ratio').value) + '%';
+  $('#zone-ratio-field').hidden = !(anchor === 'inside_ratio');
   const conf = zone.min_confidence == null ? 45 : Math.round(zone.min_confidence * 100);
   $('#zone-conf').value = conf;
   $('#zone-conf-val').textContent = conf + '%';
   $('#zone-enabled').checked = zone.enabled !== false;
   $('#zone-enabled-text').textContent = zone.enabled !== false ? 'Đang bật' : 'Đang tắt';
+  renderZoneAnalysis();
   renderClassList();
+}
+
+/** Vì sao vùng đang trống / đang có người (lấy từ kết quả suy luận gần nhất). */
+function renderZoneAnalysis() {
+  const box = $('#zone-analysis');
+  const zone = ZE.zones[ZE.active];
+  if (!box || !zone) { if (box) box.hidden = true; return; }
+  const cam = (S.state && S.state.cameras || []).find((item) => item.id === ZE.cameraId);
+  const live = cam && cam.zone_states ? cam.zone_states[zone.id] : null;
+  const analysis = live && live.analysis ? live.analysis : null;
+  if (!analysis) {
+    box.hidden = false;
+    box.innerHTML = '<b>Phân tích trực tiếp</b><br><span class="small muted">Chưa có kết quả suy luận cho vùng này — hãy mở tab <b>Trực tiếp</b> để camera chạy.</span>';
+    return;
+  }
+  const parts = [];
+  parts.push('Đối tượng trong khung: <b>' + (analysis.detections || 0) + '</b>');
+  parts.push('tính vào vùng: <b style="color:var(--green,#22c55e)">' + (analysis.matched || 0) + '</b>');
+  if (analysis.outside) parts.push('nằm ngoài vùng: <b style="color:#fbbf24">' + analysis.outside + '</b>');
+  if (analysis.ignored_class) parts.push('khác lớp: ' + analysis.ignored_class);
+  if (analysis.ignored_confidence) parts.push('dưới ngưỡng tin cậy: ' + analysis.ignored_confidence);
+  const anchorLabels = {
+    bottom_center: 'điểm chân nằm trong vùng',
+    center: 'tâm đối tượng nằm trong vùng',
+    any_overlap: 'chạm vùng là tính',
+    fully_inside: 'toàn bộ đối tượng trong vùng',
+    inside_ratio: '≥ ' + Math.round((analysis.min_ratio || zone.overlap_ratio || 0.5) * 100) + '% đối tượng trong vùng',
+    overlap_ratio: '≥ ' + Math.round((analysis.min_ratio || zone.overlap_ratio || 0.5) * 100) + '% đối tượng trong vùng',
+  };
+  const mode = anchorLabels[analysis.anchor] || analysis.anchor || '';
+  box.hidden = false;
+  box.innerHTML = '<b>Phân tích trực tiếp</b> <span class="small muted">(' + escapeHtml(mode) + ')</span><br>' +
+    '<span class="small">' + parts.join(' · ') + '</span><br>' +
+    '<span class="small" style="color:#fbbf24">Lý do: ' + escapeHtml(analysis.reason || '') + '</span>';
 }
 
 function renderClassList() {
@@ -2057,7 +2111,10 @@ function syncZoneAttributes() {
   zone.name = name;
   zone.id = id;
   zone.color = $('#zone-color').value;
-  zone.anchor = $('#zone-anchor').value;
+  const anchorValue = $('#zone-anchor').value;
+  zone.anchor = anchorValue;
+  zone.overlap_ratio = Math.max(0.05, Math.min(1, Number($('#zone-ratio').value || 50) / 100));
+  $('#zone-ratio-field').hidden = anchorValue !== 'inside_ratio';
   zone.min_confidence = Number($('#zone-conf').value) / 100;
   zone.enabled = $('#zone-enabled').checked;
   const checked = $$('#class-list input:checked').map((input) => input.value);
@@ -2868,7 +2925,11 @@ function wireZoneEditor() {
     }
     saveZones();
   });
-  ['#zone-color', '#zone-anchor', '#zone-enabled'].forEach((sel) => {
+  $('#zone-ratio').addEventListener('input', () => {
+    $('#zone-ratio-val').textContent = Math.round($('#zone-ratio').value) + '%';
+    syncZoneAttributes();   // cập nhật ngay, không cần thả chuột
+  });
+  ['#zone-color', '#zone-anchor', '#zone-enabled', '#zone-ratio'].forEach((sel) => {
     $(sel).addEventListener('change', syncZoneAttributes);
   });
   $('#zone-id').addEventListener('change', applyZoneIdInput);

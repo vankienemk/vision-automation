@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic import ValidationError
+
 from app.config import (
     MASK,
     AppConfig,
@@ -20,6 +22,7 @@ from app.config import (
     merge_masked,
     save_config,
 )
+from app.config import ZoneConfig
 
 
 # --------------------------------------------------------------------------- #
@@ -467,3 +470,35 @@ def test_zone_state_topic_colliding_with_action_topic_is_reported() -> None:
     cfg = AppConfig.model_validate(starter_data)
     warnings = cfg.topic_warnings()
     assert any(action_topic in warning for warning in warnings), warnings
+
+
+# --------------------------------------------------------------------------- #
+# Cách xác định "trong vùng": 5 chế độ + ngưỡng % (yêu cầu song song nhiều vùng)
+# --------------------------------------------------------------------------- #
+def test_anchor_accepts_new_inside_modes() -> None:
+    for anchor in ("bottom_center", "center", "any_overlap", "fully_inside", "inside_ratio", "overlap_ratio"):
+        zone = ZoneConfig.model_validate(
+            {"id": "z", "name": "Z", "polygon": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]], "anchor": anchor}
+        )
+        assert zone.anchor == anchor
+
+
+def test_anchor_rejects_unknown_mode() -> None:
+    with pytest.raises(ValidationError):
+        ZoneConfig.model_validate(
+            {"id": "z", "name": "Z", "polygon": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]], "anchor": "magic"}
+        )
+
+
+def test_overlap_ratio_bounds_are_validated() -> None:
+    for bad in (0.0, 1.5):
+        with pytest.raises(ValidationError):
+            ZoneConfig.model_validate(
+                {
+                    "id": "z",
+                    "name": "Z",
+                    "polygon": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9]],
+                    "anchor": "inside_ratio",
+                    "overlap_ratio": bad,
+                }
+            )

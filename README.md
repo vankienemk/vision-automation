@@ -50,7 +50,7 @@ Thiết kế cho chạy **24/7** trên mini-PC / NAS / Raspberry Pi 5 / PC, **ư
 |---|---|
 | Nhận diện | Ultralytics YOLO (`yolo11n.pt`, 80 lớp COCO), đổi model/imgsz/thiết bị/ngưỡng/`detect_fps` ngay trên UI |
 | Vùng | Vẽ **trực tiếp trên ảnh**: click thêm điểm, nhấn đúp để đóng, kéo điểm, kéo cả vùng, xoá điểm, Undo/Redo, hình chữ nhật nhanh; lưu **toạ độ chuẩn hoá 0..1** |
-| Đếm đúng | Neo `bottom_center` (chân người, mặc định), `center`, `any_overlap`, `overlap_ratio`; đếm theo từng lớp |
+| Đếm đúng | **5 cách xác định trong vùng**: `bottom_center` (điểm chân, mặc định), `center`, `any_overlap`, `fully_inside` (toàn bộ đối tượng), `inside_ratio` (≥ X% đối tượng, thanh trượt trên UI); đếm theo từng lớp; **mọi vùng dùng chung một kết quả suy luận** và mỗi vùng hiện lý do khi trống |
 | Chống nhấp nháy | Bỏ phiếu **3/5 khung** + `exit_grace_s` (phải vắng liên tục mới coi là trống) |
 | Kịch bản | Trình tạo bằng form: chọn vùng → điều kiện → thêm bước (hành động + chờ) trên **timeline trực quan**; tab YAML nâng cao có kiểm tra |
 | Điều kiện | `enter`, `vacant`, `count_ge`, `count_le`, `dwell`, `class_present` |
@@ -335,6 +335,29 @@ Bỏ qua bước nào cũng được — mọi thứ sửa lại được sau tr
    có **thanh vàng** báo *"Đang vẽ vùng mới — N điểm"* để không ai bị kẹt ở chế độ vẽ; bấm trúng điểm
    của một vùng có sẵn sẽ **tự huỷ** bản nháp và sửa vùng đó.
 7. Đặt **tên**, **màu**, **cách xác định trong vùng**, **ngưỡng tin cậy riêng**, bật/tắt vùng.
+
+   **Cách xác định "trong vùng"** — 5 chế độ (chọn ở ô *Cách xác định "trong vùng"*):
+
+   | Chế độ | Khi nào một đối tượng được tính là trong vùng | Dùng khi |
+   |---|---|---|
+   | **Điểm chân đối tượng** | điểm giữa-mép-dưới khung đối tượng nằm trong đa giác | camera nhìn chếch/từ trên xuống, thấy cả chân người |
+   | **Tâm đối tượng** | tâm khung đối tượng nằm trong đa giác | camera nhìn ngang, người đứng giữa khung |
+   | **Chạm vào vùng là tính** | khung đối tượng chạm/giao với đa giác (dù chỉ 1 px) | muốn nhạy nhất, không bỏ sót người đi ngang mép |
+   | **Toàn bộ đối tượng nằm trong vùng** | cả khung đối tượng nằm gọn trong đa giác (≥98% diện tích) | chỉ tính khi người đã vào hẳn trong vùng |
+   | **% đối tượng nằm trong vùng** | ≥ **X%** diện tích khung đối tượng nằm trong đa giác (thanh trượt 5–95%) | **camera nhìn gần**: chân người bị cắt mép dưới nên "điểm chân" luôn nằm ngoài |
+
+   > **Lỗi hay gặp:** vùng **không bao giờ báo có người** dù người đứng rõ trong vùng. Nguyên nhân
+   > thường là chế độ **Điểm chân** trong khi đa giác không với tới mép dưới khung hình (camera gần,
+   > chân người ở ngoài ảnh). App giờ ghi rõ lý do ngay trong tab này (khung trống **"Phân tích trực
+   > tiếp"**) và trong danh sách vùng ở tab **Trực tiếp** — ví dụ *"điểm chân nằm NGOÀI vùng — chọn
+   > cách xác định khác"*. Cách sửa nhanh: đổi sang **% đối tượng nằm trong vùng** rồi hạ ngưỡng
+   > xuống 30–40%, hoặc kéo đa giác xuống sát mép dưới.
+
+   **Các vùng chạy song song trên CÙNG một kết quả suy luận:** model chỉ chạy **một lần** cho mỗi khung
+   hình; toạ độ mọi đối tượng được quy đổi **một lần**, rồi **từng vùng** tự quyết định theo chế độ
+   riêng của nó. Thêm 5 vùng không làm tăng thời gian suy luận — chỉ tăng vài phép toán toạ độ.
+   Trên ảnh có **chấm neo** ở điểm chân mỗi đối tượng: **xanh** = đang được ít nhất một vùng tính,
+   **hổ phách** = không vùng nào tính (nhìn là biết ngay vì sao vùng trống).
 8. Tick **lớp đối tượng** (mặc định `person`); ô tìm kiếm giúp lọc nhanh trong 80 lớp.
 9. **Lưu vùng** — toạ độ lưu dạng chuẩn hoá 0..1 nên đổi độ phân giải vẫn đúng.
 
@@ -681,7 +704,9 @@ mosquitto_pub -h 192.168.1.10 -t zigbee2mqtt/den_bep/set -m '{"state":"ON"}'
 | Đèn nhấp nháy | Tăng `enter_confirm` (3/5 hoặc 4/5) và `exit_grace_s` lên 4–5 giây; kiểm tra vùng có bao gồm vùng nhiễu (TV, gương). |
 | Không thấy lệnh MQTT | Đang bật **Dry-run**? (header có băng vàng). Kiểm tra tab MQTT → “Kiểm tra kết nối”, đúng host/port/user/password, và topic có đúng không. |
 | `MQTT mất kết nối` liên tục | Sai user/password, broker chặn `client_id` trùng, firewall. Xem log tab Nhật ký. |
-| Không thấy ai trong vùng dù có người | Vẽ lại vùng cho khớp (dùng khung Xem trước), giảm ngưỡng tin cậy, thử `anchor: any_overlap`, tăng `imgsz`. |
+| Không thấy ai trong vùng dù có người | Xem dòng **Phân tích trực tiếp** trong tab Vùng phát hiện (hoặc lý do ngay dưới tên vùng ở tab Trực tiếp): nếu báo *"điểm chân nằm NGOÀI vùng"* thì đổi **Cách xác định** sang **% đối tượng nằm trong vùng** (hạ xuống 30–40%) hoặc kéo vùng xuống sát mép dưới; nếu báo *"dưới ngưỡng tin cậy"* thì hạ **Ngưỡng tin cậy riêng**; nếu báo *"khác lớp"* thì tick lại đúng lớp (ví dụ `person`). |
+| Vùng báo có người khi không có ai / báo trống chập chờn | Chọn chế độ **Toàn bộ đối tượng nằm trong vùng** (chặt hơn), tăng `enter_confirm.frames`/`of` trong YAML, hoặc tăng `exit_grace_s`. |
+| Chấm neo trên ảnh màu hổ phách | Đối tượng không được vùng nào tính — bình thường khi người đứng ngoài mọi vùng; nếu đang đứng trong vùng thì xem lý do như dòng trên. |
 | Model không nạp được | Chưa cài `ultralytics`/`torch`: `pip install -r requirements.txt`. Máy không có mạng lần đầu → tải trước `yolo11n.pt` và đặt cạnh `config.yaml`. |
 | Web UI không mở được từ điện thoại | Dùng `web.host: 0.0.0.0`, mở `http://<ip-máy>:8080`, kiểm tra firewall; nếu bật auth thì đăng nhập. |
 | Máy chạy chậm / nóng | Giảm `detect_fps`, `imgsz`; bật `motion_gating`; đặt `device: cpu` nếu MPS gây nóng. |
@@ -772,10 +797,12 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**231 test**) phủ:
+Bộ test (**244 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
-- **`tests/test_zones.py`** — hình học đa giác, neo, `overlap_ratio`, bỏ phiếu 3/5 + grace.
+- **`tests/test_zones.py`** — hình học đa giác, **5 chế độ xác định trong vùng**
+  (`bottom_center`/`center`/`any_overlap`/`fully_inside`/`inside_ratio`), **nhiều vùng chạy
+  song song trên một tập đối tượng**, phần phân tích "vì sao vùng trống", bỏ phiếu 3/5 + grace.
 - **`tests/test_scenarios.py`** — máy trạng thái với **đồng hồ giả**: timeline mờ/tắt,
   khung giờ, dwell, count_ge/le, class_present, cooldown, tạm dừng khi chỉnh tay.
 - **`tests/test_capture.py`** — nguồn ảnh/video, khung mới nhất, lazy open, cách ly lỗi.
@@ -822,7 +849,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 231 test (pytest + Playwright UI), gồm test_platform.py
+├── tests/                  # 244 test (pytest + Playwright UI), gồm test_platform.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown

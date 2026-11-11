@@ -420,3 +420,17 @@ button.btn.attention {
 .diag-decision .mono { color: var(--muted); flex: none; }
 .diag-decision .ok { color: #bbf7d0; }
 .sc-card .why { margin-top: 6px; font-size: 12px; color: #cbd5e1; background: #0b1526; border-left: 3px solid #1d4ed8; padding: 4px 8px; border-radius: 4px; }
+
+/* Vì sao vùng trống (phân tích trực tiếp trong trình sửa vùng) */
+.zone-analysis {
+  margin: 8px 0 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #0f172acc;
+  border: 1px solid #1e293b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.zone-analysis b { color: #e2e8f0; }
+.zone-item .zwarn { display: block; font-size: 11px; color: #fbbf24; margin-top: 2px; }
+#zone-ratio-field[hidden] { display: none; }

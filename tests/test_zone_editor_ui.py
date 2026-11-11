@@ -126,7 +126,42 @@ def _state_payload() -> dict:
                 "inference": {"fps": 4.0, "ms": 20.0},
                 "detections": [],
                 "zones": ZONES,
-                "zone_states": {},
+                "zone_states": {
+                    "khuvuc_test": {
+                        "occupied": True,
+                        "count": 2,
+                        "class_counts": {"person": 2},
+                        "anchor": "bottom_center",
+                        "overlap_ratio": 0.5,
+                        "analysis": {
+                            "detections": 3,
+                            "matched": 2,
+                            "outside": 1,
+                            "ignored_class": 0,
+                            "ignored_confidence": 0,
+                            "anchor": "bottom_center",
+                            "best_ratio": 1.0,
+                            "reason": "2 đối tượng trong vùng",
+                        },
+                    },
+                    "vung_2": {
+                        "occupied": False,
+                        "count": 0,
+                        "class_counts": {},
+                        "anchor": "bottom_center",
+                        "overlap_ratio": 0.5,
+                        "analysis": {
+                            "detections": 3,
+                            "matched": 0,
+                            "outside": 1,
+                            "ignored_class": 0,
+                            "ignored_confidence": 0,
+                            "anchor": "bottom_center",
+                            "best_ratio": 0.12,
+                            "reason": "điểm chân nằm NGOÀI vùng — chọn cách xác định khác",
+                        },
+                    },
+                },
             }
         ],
         "mqtt": {"connected": False, "dry_run": True},
@@ -165,6 +200,37 @@ def _state_payload() -> dict:
                             "pending_exit_s": None,
                             "forced": False,
                             "since": "2026-01-01T10:00:00",
+                            "anchor": "bottom_center",
+                            "overlap_ratio": 0.5,
+                            "analysis": {
+                                "detections": 3,
+                                "matched": 2,
+                                "outside": 1,
+                                "ignored_class": 0,
+                                "ignored_confidence": 0,
+                                "anchor": "bottom_center",
+                                "best_ratio": 1.0,
+                                "reason": "2 đối tượng trong vùng",
+                            },
+                        },
+                        "vung_2": {
+                            "occupied": False,
+                            "count": 0,
+                            "pending_exit_s": None,
+                            "forced": False,
+                            "since": None,
+                            "anchor": "bottom_center",
+                            "overlap_ratio": 0.5,
+                            "analysis": {
+                                "detections": 3,
+                                "matched": 0,
+                                "outside": 1,
+                                "ignored_class": 0,
+                                "ignored_confidence": 0,
+                                "anchor": "bottom_center",
+                                "best_ratio": 0.12,
+                                "reason": "điểm chân nằm NGOÀI vùng — chọn cách xác định khác",
+                            },
                         }
                     },
                 }
@@ -558,3 +624,58 @@ def test_self_intersecting_polygon_is_rejected_with_reason(open_zone_tab):
     assert not handler.saved_zones, "vùng tự cắt nhau vẫn được gửi lên server"
     toasts = page.eval_on_selector("#toasts", "el => el.textContent")
     assert "tự cắt" in toasts.lower(), toasts
+
+
+# --------------------------------------------------------------------------- #
+# 11. Cách xác định "trong vùng": đủ 5 chế độ + thanh % + lưu đúng giá trị
+# --------------------------------------------------------------------------- #
+def test_anchor_modes_cover_inside_and_percentage(open_zone_tab):
+    page, _rect = open_zone_tab(1)
+    options = page.eval_on_selector_all(
+        "#zone-anchor option", "els => els.map(el => el.value)"
+    )
+    for value in ("bottom_center", "center", "any_overlap", "fully_inside", "inside_ratio"):
+        assert value in options, f"thiếu chế độ xác định '{value}': {options}"
+    # Thanh % chỉ hiện khi chọn chế độ "% đối tượng nằm trong vùng"
+    assert page.eval_on_selector("#zone-ratio-field", "el => el.hidden") is True
+    page.select_option("#zone-anchor", "inside_ratio")
+    page.wait_for_timeout(150)
+    assert page.eval_on_selector("#zone-ratio-field", "el => el.hidden") is False
+
+
+def test_anchor_and_ratio_are_sent_to_server(open_zone_tab):
+    _Handler.saved_zones.clear()
+    page, _rect = open_zone_tab(1)
+    _select_zone(page, 0)
+    page.select_option("#zone-anchor", "fully_inside")
+    page.wait_for_timeout(120)
+    page.click("#zone-save")
+    page.wait_for_timeout(400)
+    assert _Handler.saved_zones, "không gửi dữ liệu vùng lên server"
+    first = _Handler.saved_zones[-1]["zones"][0]
+    assert first["anchor"] == "fully_inside"
+
+    page.select_option("#zone-anchor", "inside_ratio")
+    page.eval_on_selector(
+        "#zone-ratio", "el => { el.value = '70'; el.dispatchEvent(new Event('input')); }"
+    )
+    page.wait_for_timeout(150)
+    page.click("#zone-save")
+    page.wait_for_timeout(400)
+    first = _Handler.saved_zones[-1]["zones"][0]
+    assert first["anchor"] == "inside_ratio"
+    assert abs(float(first["overlap_ratio"]) - 0.7) < 0.001
+
+
+# --------------------------------------------------------------------------- #
+# 12. Trình sửa vùng phải GIẢI THÍCH vì sao vùng đang trống
+# --------------------------------------------------------------------------- #
+def test_zone_editor_explains_why_a_zone_is_empty(open_zone_tab):
+    page, _rect = open_zone_tab(1)
+    _select_zone(page, 1)          # vung_2: mô phỏng "điểm chân nằm NGOÀI vùng"
+    page.wait_for_timeout(300)
+    text = page.eval_on_selector("#zone-analysis", "el => el.textContent")
+    assert "Phân tích trực tiếp" in text
+    assert "NGOÀI vùng" in text
+    live = page.eval_on_selector("#live-zones", "el => el.textContent")
+    assert "ngoài vùng" in live

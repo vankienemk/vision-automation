@@ -134,6 +134,13 @@ def normalised_to_pixels(polygon: Sequence[Point], width: int, height: int) -> l
     return [(x * width, y * height) for x, y in polygon]
 
 
+def _inside_ratio(item: "PreparedDetection", polygon: Sequence[Point]) -> float:
+    """Tỉ lệ (0..1) diện tích khung đối tượng nằm trong vùng."""
+    if item.area <= 0:
+        return 0.0
+    return box_polygon_overlap_area(item.box, polygon) / item.area
+
+
 def anchor_point(box: Box, mode: AnchorMode) -> Point:
     if mode == "center":
         return box.center
@@ -172,6 +179,10 @@ class ZoneState:
     forced: bool = False
     detections: list[Detection] = field(default_factory=list)
     pending_exit: float | None = None
+    #: Kết quả phân tích của khung hình gần nhất cho vùng này (giải thích vì sao
+    #: trống/có người): số đối tượng bị loại vì lớp, vì độ tin cậy, vì nằm ngoài
+    #: vùng, tỉ lệ % trong vùng tốt nhất… Xem ``ZoneEngine._analyse_zone``.
+    analysis: dict[str, object] = field(default_factory=dict)
 
     @property
     def ref(self) -> str:
@@ -190,8 +201,32 @@ class ZoneState:
             "updated_at": self.updated_at,
             "forced": self.forced,
             "pending_exit": self.pending_exit,
+            "analysis": dict(self.analysis),
         }
 
+
+@dataclass(frozen=True)
+class PreparedDetection:
+    """Một đối tượng đã quy đổi toạ độ MỘT LẦN cho cả khung hình.
+
+    Nhờ vậy mọi vùng dùng chung một kết quả suy luận và cùng một phép quy đổi
+    toạ độ (pixel → chuẩn hoá), thay vì mỗi vùng tự tính lại.
+    """
+
+    detection: Detection
+    box: Box
+    norm_box: tuple[float, float, float, float]   # x1, y1, x2, y2 trong 0..1
+    area: float                                   # pixel²
+
+
+@dataclass(frozen=True)
+class ZoneMatch:
+    """Kết quả một đối tượng được kiểm tra với một vùng."""
+
+    matched: bool
+    anchor: Point | None = None       # điểm neo dùng để xét (nếu chế độ dùng điểm)
+    ratio: float = 0.0                # % diện tích đối tượng nằm trong vùng (0..1)
+    reason: str = ""                  # vì sao khớp/không khớp (tiếng Việt, ngắn)
 
 class PresenceTracker:
     """K-of-N voting + exit grace for a single zone.
@@ -381,6 +416,12 @@ class ZoneEngine:
         "không có ai": danh sách detection rỗng khi đó KHÔNG được đưa vào cửa sổ
         bỏ phiếu (xem :meth:`PresenceTracker.update`).
         """
+        # QUAN TRỌNG: mọi vùng đọc trên CÙNG một kết quả suy luận và CÙNG một
+        # phép quy đổi toạ độ. Model chỉ chạy một lần cho mỗi khung hình (do
+        # luồng suy luận trong runtime đảm bảo), rồi từng vùng tự quyết định
+        # theo ``anchor`` của nó — các vùng chạy song song, không vùng nào phát
+        # sinh detection riêng.
+        prepared = self.prepare_detections(detections, frame_width, frame_height)
         states: list[ZoneState] = []
         for zone_id, zone in self._zones.items():
             state = self._states[zone_id]
@@ -398,10 +439,12 @@ class ZoneEngine:
                 state.since = None
                 state.pending_exit = None
                 state.forced = False
+                state.analysis = {"reason": "vùng đang tắt (không được đánh giá)"}
                 state.updated_at = now
                 states.append(state)
                 continue
-            counts = self._count_zone(zone, detections, frame_width, frame_height)
+            counts, analysis = self._analyse_zone(zone, prepared, frame_width, frame_height)
+            state.analysis = analysis
             tracker = self._trackers[zone_id]
             forced = self._forced.get(zone_id)
             if forced is not None:
@@ -410,6 +453,7 @@ class ZoneEngine:
                 state.class_counts = dict(forced[2])
                 state.forced = True
                 state.detections = []
+                state.analysis = {"reason": "đang MÔ PHỎNG (bỏ qua kết quả suy luận thật)"}
             else:
                 previous = tracker.occupied
                 occupied, changed = tracker.update(now, counts, sample=sample)
@@ -477,6 +521,159 @@ class ZoneEngine:
                 changes.append((state, bool(state.occupied)))
         return states, changes
 
+    # -- chia sẻ một kết quả suy luận cho MỌI vùng -------------------------- #
+    @staticmethod
+    def prepare_detections(
+        detections: Sequence[Detection],
+        frame_width: int,
+        frame_height: int,
+    ) -> list[PreparedDetection]:
+        """Quy đổi toạ độ của mọi đối tượng MỘT LẦN cho cả khung hình.
+
+        Đây là điểm mấu chốt của yêu cầu "các vùng hoạt động song song, phân
+        tích theo toạ độ sau mỗi lần suy luận": model chỉ chạy MỘT lần cho mỗi
+        khung hình, rồi mọi vùng cùng đọc trên đúng tập đối tượng + toạ độ đó
+        (không vùng nào tự chạy suy luận riêng).
+        """
+        prepared: list[PreparedDetection] = []
+        if frame_width <= 0 or frame_height <= 0:
+            return prepared
+        for detection in detections:
+            box = detection.box
+            norm = (
+                box.x1 / frame_width,
+                box.y1 / frame_height,
+                box.x2 / frame_width,
+                box.y2 / frame_height,
+            )
+            prepared.append(
+                PreparedDetection(
+                    detection=detection,
+                    box=box,
+                    norm_box=norm,
+                    area=max(0.0, box.area),
+                )
+            )
+        return prepared
+
+    def _analyse_zone(
+        self,
+        zone: ZoneConfig,
+        prepared: Sequence[PreparedDetection],
+        frame_width: int,
+        frame_height: int,
+    ) -> tuple[ZoneCounts, dict[str, object]]:
+        """Đếm đối tượng trong MỘT vùng + ghi lại lý do loại từng đối tượng.
+
+        Trả về ``(counts, analysis)``. ``analysis`` là phần "vì sao vùng trống",
+        hiện thẳng trên UI để người dùng không phải đoán.
+        """
+        counts = ZoneCounts()
+        analysis: dict[str, object] = {
+            "detections": len(prepared),
+            "classes": list(zone.classes),
+            "anchor": zone.anchor,
+            "ignored_class": 0,
+            "ignored_confidence": 0,
+            "outside": 0,
+            "matched": 0,
+            "min_confidence": (
+                zone.min_confidence
+                if zone.min_confidence is not None
+                else self.global_min_confidence
+            ),
+            "best_ratio": 0.0,
+            "min_ratio": float(zone.overlap_ratio),
+            "reason": "",
+        }
+        if frame_width <= 0 or frame_height <= 0 or not prepared:
+            analysis["reason"] = (
+                "chưa có kết quả suy luận cho khung hình này"
+                if not prepared
+                else "kích thước khung hình không hợp lệ"
+            )
+            return counts, analysis
+
+        polygon = normalised_to_pixels(zone.polygon, frame_width, frame_height)
+        min_confidence = float(analysis["min_confidence"])  # type: ignore[arg-type]
+        allowed = {name.lower() for name in zone.classes}
+
+        best: ZoneMatch | None = None
+        for item in prepared:
+            detection = item.detection
+            if allowed and detection.class_name.lower() not in allowed:
+                analysis["ignored_class"] = int(analysis["ignored_class"]) + 1  # type: ignore[arg-type]
+                continue
+            if detection.confidence < min_confidence:
+                analysis["ignored_confidence"] = int(analysis["ignored_confidence"]) + 1  # type: ignore[arg-type]
+                continue
+            match = self._match(zone, item, polygon)
+            if match.matched:
+                counts.add(detection)
+            else:
+                analysis["outside"] = int(analysis["outside"]) + 1  # type: ignore[arg-type]
+            if best is None or match.ratio > best.ratio or (match.matched and not best.matched):
+                best = match
+
+        analysis["matched"] = counts.total
+        if best is not None:
+            analysis["best_ratio"] = round(best.ratio, 3)
+            analysis["reason"] = best.reason
+        if counts.total:
+            analysis["reason"] = f"{counts.total} đối tượng trong vùng"
+        elif not analysis["reason"]:
+            analysis["reason"] = "không có đối tượng nào trong khung hình"
+        return counts, analysis
+
+    @staticmethod
+    def _match(zone: ZoneConfig, item: PreparedDetection, polygon: Sequence[Point]) -> ZoneMatch:
+        """Một đối tượng có nằm trong vùng không (theo chế độ ``anchor`` của vùng)."""
+        box = item.box
+        anchor = zone.anchor
+        if anchor == "any_overlap":
+            ratio = _inside_ratio(item, polygon)
+            if ratio > 0.0:
+                return ZoneMatch(True, None, ratio, "chạm vào vùng")
+            return ZoneMatch(False, None, ratio, "không chạm vùng")
+        if anchor in ("inside_ratio", "overlap_ratio"):
+            if item.area <= 0:
+                return ZoneMatch(False, None, 0.0, "khung đối tượng không có diện tích")
+            ratio = _inside_ratio(item, polygon)
+            need = float(zone.overlap_ratio)
+            if ratio >= need:
+                return ZoneMatch(
+                    True, None, ratio, f"{ratio * 100:.0f}% đối tượng nằm trong vùng"
+                )
+            return ZoneMatch(
+                False,
+                None,
+                ratio,
+                f"chỉ {ratio * 100:.0f}% đối tượng nằm trong vùng (cần ≥ {need * 100:.0f}%)",
+            )
+        if anchor == "fully_inside":
+            ratio = _inside_ratio(item, polygon)
+            if ratio >= 0.98:
+                return ZoneMatch(True, None, ratio, "toàn bộ đối tượng nằm trong vùng")
+            return ZoneMatch(
+                False,
+                None,
+                ratio,
+                f"đối tượng chưa nằm trọn trong vùng ({ratio * 100:.0f}% nằm trong)",
+            )
+        mode = "center" if anchor == "center" else "bottom_center"
+        point = anchor_point(box, mode)
+        label = "tâm đối tượng" if mode == "center" else "điểm chân"
+        if point_in_polygon(point[0], point[1], polygon):
+            ratio = _inside_ratio(item, polygon)
+            return ZoneMatch(True, point, ratio, f"{label} nằm trong vùng")
+        return ZoneMatch(
+            False,
+            point,
+            _inside_ratio(item, polygon),
+            f"{label} nằm NGOÀI vùng — chọn cách xác định khác (vd “% đối tượng trong vùng”) "
+            "hoặc kéo vùng rộng/cao thêm",
+        )
+
     def _count_zone(
         self,
         zone: ZoneConfig,
@@ -484,34 +681,10 @@ class ZoneEngine:
         frame_width: int,
         frame_height: int,
     ) -> ZoneCounts:
-        counts = ZoneCounts()
-        if frame_width <= 0 or frame_height <= 0:
-            return counts
-        polygon = normalised_to_pixels(zone.polygon, frame_width, frame_height)
-        min_confidence = zone.min_confidence if zone.min_confidence is not None else self.global_min_confidence
-        allowed = {name.lower() for name in zone.classes}
-        for detection in detections:
-            if allowed and detection.class_name.lower() not in allowed:
-                continue
-            if detection.confidence < min_confidence:
-                continue
-            if self._match(zone, detection, polygon):
-                counts.add(detection)
+        """Tương thích cũ: đếm đối tượng trong một vùng (không kèm phân tích)."""
+        prepared = self.prepare_detections(detections, frame_width, frame_height)
+        counts, _analysis = self._analyse_zone(zone, prepared, frame_width, frame_height)
         return counts
-
-    @staticmethod
-    def _match(zone: ZoneConfig, detection: Detection, polygon: Sequence[Point]) -> bool:
-        box = detection.box
-        anchor = zone.anchor
-        if anchor == "any_overlap":
-            return box_polygon_overlap_area(box, polygon) > 0.0
-        if anchor == "overlap_ratio":
-            if box.area <= 0:
-                return False
-            ratio = box_polygon_overlap_area(box, polygon) / box.area
-            return ratio >= zone.overlap_ratio
-        point = anchor_point(box, "center" if anchor == "center" else "bottom_center")
-        return point_in_polygon(point[0], point[1], polygon)
 
 
 def zone_crop_box(

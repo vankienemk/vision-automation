@@ -419,3 +419,107 @@ def test_engine_multiple_zones_and_state_dict() -> None:
     assert payload["zone"] == "cam/left"
     assert payload["occupied"] is True
     assert payload["class_counts"] == {"person": 1}
+
+
+# --------------------------------------------------------------------------- #
+# Các vùng chạy SONG SONG trên MỘT kết quả suy luận + các chế độ xác định mới
+# --------------------------------------------------------------------------- #
+def _zone(zone_id: str, polygon, **extra) -> ZoneConfig:
+    data = {
+        "id": zone_id,
+        "name": zone_id,
+        "polygon": polygon,
+        "classes": ["person"],
+        "enter_confirm": {"frames": 1, "of": 1},
+        "exit_grace_s": 0.0,
+    }
+    data.update(extra)
+    return ZoneConfig.model_validate(data)
+
+
+def _person(x1: float, y1: float, x2: float, y2: float, confidence: float = 0.9) -> Detection:
+    return Detection(
+        class_id=0,
+        class_name="person",
+        confidence=confidence,
+        box=Box(x1, y1, x2, y2),
+    )
+
+
+def test_two_zones_run_in_parallel_on_one_detection_set() -> None:
+    """Một kết quả suy luận, nhiều vùng: mỗi vùng tự quyết định theo cấu hình riêng."""
+    left = _zone("trai", [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]])
+    right = _zone("phai", [[0.55, 0.0], [1.0, 0.0], [1.0, 1.0], [0.55, 1.0]])
+    engine = ZoneEngine("cam", [left, right], 0.4)
+    person = _person(100, 100, 300, 400)          # nằm hoàn toàn bên TRÁI (khung 800×600)
+    states = engine.evaluate(0.0, [person], 800, 600)
+    by_id = {state.zone_id: state for state in states}
+    assert by_id["trai"].count == 1 and by_id["trai"].occupied is True
+    assert by_id["phai"].count == 0 and by_id["phai"].occupied is False
+    # Cùng một đối tượng nhưng mỗi vùng có lý do riêng của nó.
+    assert "trong vùng" in str(by_id["trai"].analysis["reason"])
+    assert "NGOÀI vùng" in str(by_id["phai"].analysis["reason"])
+
+
+def test_fully_inside_requires_the_whole_object_inside() -> None:
+    zone = _zone("vung", [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]], anchor="fully_inside")
+    engine = ZoneEngine("cam", [zone], 0.4)
+    inside = _person(200, 150, 560, 450)          # trọn trong vùng
+    straddling = _person(200, 150, 700, 450)      # thò ra ngoài mép phải
+    assert engine.evaluate(0.0, [inside], 800, 600)[0].count == 1
+    state = engine.evaluate(1.0, [straddling], 800, 600)[0]
+    assert state.count == 0
+    assert "chưa nằm trọn" in str(state.analysis["reason"])
+
+
+def test_inside_ratio_respects_the_configured_percentage() -> None:
+    zone = _zone(
+        "vung",
+        [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]],
+        anchor="inside_ratio",
+        overlap_ratio=0.6,
+    )
+    engine = ZoneEngine("cam", [zone], 0.4)
+    # Nửa trái: 300/400 px chiều rộng nằm trong vùng ⇒ 75% ≥ 60% → tính
+    mostly_in = _person(100, 100, 500, 400)
+    assert engine.evaluate(0.0, [mostly_in], 800, 600)[0].count == 1
+    # 250/500 px ⇒ 50% < 60% → không tính
+    half_out = _person(150, 100, 650, 400)
+    state = engine.evaluate(1.0, [half_out], 800, 600)[0]
+    assert state.count == 0
+    assert "cần ≥ 60%" in str(state.analysis["reason"])
+
+
+def test_any_overlap_counts_a_touching_object() -> None:
+    zone = _zone("vung", [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]], anchor="any_overlap")
+    engine = ZoneEngine("cam", [zone], 0.4)
+    touching = _person(380, 100, 600, 400)   # chỉ chạm vùng ở mép
+    assert engine.evaluate(0.0, [touching], 800, 600)[0].count == 1
+
+
+def test_analysis_explains_every_rejection_reason() -> None:
+    zone = _zone("vung", [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]], min_confidence=0.8)
+    engine = ZoneEngine("cam", [zone], 0.4)
+    cat = Detection(class_id=15, class_name="cat", confidence=0.95, box=Box(100, 100, 200, 200))
+    weak = _person(100, 100, 200, 300, confidence=0.5)
+    outside = _person(600, 100, 700, 300)
+    state = engine.evaluate(0.0, [cat, weak, outside], 800, 600)[0]
+    analysis = state.analysis
+    assert analysis["detections"] == 3
+    assert analysis["ignored_class"] == 1
+    assert analysis["ignored_confidence"] == 1
+    assert analysis["outside"] == 1
+    assert analysis["matched"] == 0
+    assert analysis["anchor"] == "bottom_center"
+
+
+def test_overlap_ratio_legacy_name_still_works() -> None:
+    zone = _zone(
+        "vung",
+        [[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]],
+        anchor="overlap_ratio",
+        overlap_ratio=0.6,
+    )
+    engine = ZoneEngine("cam", [zone], 0.4)
+    mostly_in = _person(100, 100, 500, 400)   # 75% nằm trong
+    assert engine.evaluate(0.0, [mostly_in], 800, 600)[0].count == 1

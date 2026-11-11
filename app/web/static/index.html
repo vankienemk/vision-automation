@@ -169,11 +169,15 @@
         </label>
         <label class="field"><span>Cách xác định “trong vùng”</span>
           <select id="zone-anchor">
-            <option value="bottom_center">Chân người (khuyên dùng)</option>
-            <option value="center">Tâm khung</option>
-            <option value="any_overlap">Chạm vùng là tính</option>
-            <option value="overlap_ratio">Tỉ lệ chồng lấn</option>
+            <option value="bottom_center">Điểm chân đối tượng nằm trong vùng</option>
+            <option value="center">Tâm đối tượng nằm trong vùng</option>
+            <option value="any_overlap">Chạm vào vùng là tính</option>
+            <option value="fully_inside">Toàn bộ đối tượng nằm trong vùng</option>
+            <option value="inside_ratio">% đối tượng nằm trong vùng</option>
           </select>
+        </label>
+        <label class="field" id="zone-ratio-field" hidden><span>Phần trăm tối thiểu <b id="zone-ratio-val">50%</b></span>
+          <input type="range" id="zone-ratio" min="5" max="95" step="5" value="50">
         </label>
         <label class="field"><span>Ngưỡng tin cậy riêng <b id="zone-conf-val">45%</b></span>
           <input type="range" id="zone-conf" min="5" max="95" step="5" value="45">
@@ -182,6 +186,15 @@
           <label class="switch"><input type="checkbox" id="zone-enabled" checked><span class="track"></span><span id="zone-enabled-text">Đang bật</span></label>
         </label>
       </div>
+      <p class="small muted" id="zone-anchor-help">
+        <b>Điểm chân</b>: người phải đứng sao cho điểm chân (giữa mép dưới khung) ở trong vùng — hợp với camera nhìn từ trên xuống.
+        <b>Tâm</b>: tâm khung đối tượng ở trong vùng.
+        <b>Chạm vùng</b>: chỉ cần đối tượng chạm vào vùng.
+        <b>Toàn bộ trong vùng</b>: cả khung đối tượng phải nằm gọn trong vùng.
+        <b>% trong vùng</b>: ít nhất X% diện tích đối tượng nằm trong vùng.
+        Nếu camera nhìn gần (người đứng sát, chân bị cắt mép dưới) thì nên dùng <b>% đối tượng nằm trong vùng</b>.
+      </p>
+      <div class="zone-analysis" id="zone-analysis" hidden></div>
       <p class="small muted">
         Mã vùng dùng để kịch bản trỏ tới vùng này nên được <b>khoá</b> — đổi tên vùng không làm hỏng kịch bản.
         Chỉ bấm 🔒 khi thật sự muốn đổi mã (app sẽ tự cập nhật kịch bản theo mã mới).
