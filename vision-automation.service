@@ -1,0 +1,61 @@
+# =============================================================================
+# systemd unit — chạy 24/7 trên Raspberry Pi / mini-PC / NAS (Linux)
+#
+# Cài đặt:
+#   sudo cp vision-automation.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now vision-automation
+#   journalctl -u vision-automation -f          # xem log
+#
+# Sửa User/WorkingDirectory/ExecStart cho khớp máy của bạn.
+# =============================================================================
+[Unit]
+Description=Vision Automation - dieu khien thiet bi theo vung phat hien trong camera
+Documentation=file:///opt/vision-automation/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/vision-automation
+
+# Dùng đúng venv của dự án
+ExecStart=/opt/vision-automation/.venv/bin/python -m app --config /opt/vision-automation/config.yaml
+
+# Dừng êm: app sẽ gửi "offline" cho MQTT, đóng luồng camera và lưu config
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+Environment=PYTHONUNBUFFERED=1
+Environment=YOLO_CONFIG_DIR=/opt/vision-automation/.yolo
+# Bí mật nên để trong file riêng, không ghi vào unit
+EnvironmentFile=-/etc/vision-automation.env
+
+# Nhật ký: xem bằng journalctl -u vision-automation
+StandardOutput=journal
+StandardError=journal
+
+# --- Bảo mật cơ bản -------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/vision-automation
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# --- Tài nguyên ------------------------------------------------------------
+# Giới hạn RAM/CPU để NAS không bị "ngộp" (tuỳ chỉnh)
+MemoryMax=3G
+CPUQuota=250%
+OOMPolicy=continue
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,228 @@
+# =============================================================================
+# Vision Automation — cấu hình mẫu (copy thành config.yaml rồi sửa)
+#
+#   cp config.example.yaml config.yaml
+#   python -m app
+#
+# Mọi thứ trong tệp này đều sửa được từ Web UI (tab Cài đặt / Kịch bản / Vùng).
+# Bí mật (mật khẩu, token) nên đặt qua biến môi trường dạng ${TEN_BIEN},
+# UI sẽ hiển thị **** thay vì lộ giá trị thật.
+# =============================================================================
+schema_version: 1
+
+# false = lần đầu mở Web UI sẽ hiện trình hướng dẫn thiết lập (wizard)
+setup_completed: false
+
+# -----------------------------------------------------------------------------
+# MQTT broker
+# -----------------------------------------------------------------------------
+mqtt:
+  host: 192.168.1.10
+  port: 1883
+  username: ""                 # ví dụ: mqtt_user
+  password: ""                 # ví dụ: ${MQTT_PASSWORD}
+  client_id: vision-automation
+  # Last-Will: broker tự phát "offline" nếu app chết đột ngột
+  availability_topic: vision/status
+  base_topic: vision          # topic trạng thái vùng: vision/<camera>/<vùng>/state
+  keepalive: 30
+  tls: false
+  tls_insecure: false
+  ca_certs: ""
+  dry_run: false              # true = chỉ ghi log, không gửi lệnh thật
+  queue_max: 50               # số lệnh chờ tối đa khi mất mạng
+  reconnect_min_s: 1
+  reconnect_max_s: 30
+  publish_zone_state: true    # phát retained vision/<cam>/<vùng>/state
+  monitor_max: 200            # số dòng nhật ký MQTT giữ cho tab MQTT
+
+# -----------------------------------------------------------------------------
+# Nhận diện đối tượng (Ultralytics YOLO)
+# -----------------------------------------------------------------------------
+detector:
+  model: yolo11n.pt           # tự tải về lần đầu (~5 MB)
+  device: auto                # auto | cpu | mps | cuda:0  (auto: mps → cuda → cpu)
+  imgsz: 640                  # 320 để nhẹ hơn, 960 để xa hơn
+  min_confidence: 0.45
+  detect_fps: 4               # suy luận 4 lần/giây, KHÔNG phải mỗi khung hình
+  max_det: 50
+  half: false                 # FP16, chỉ có tác dụng trên CUDA
+  classes_allow: []           # rỗng = cho phép tất cả lớp của model
+  motion_gating: false        # bỏ bớt suy luận khi cảnh đứng yên + vùng trống
+  idle_detect_fps: 1.0        # fps tối thiểu khi đang "tĩnh"
+  motion_threshold: 1.5       # ngưỡng điểm khác biệt (0-255) để coi là tĩnh
+  crop_to_zones: false        # chỉ suy luận phần bao quanh vùng
+
+# -----------------------------------------------------------------------------
+# Camera
+#   source: rtsp | webcam | file | image
+# -----------------------------------------------------------------------------
+cameras:
+  - id: cam_bep
+    name: Camera bếp
+    source: rtsp
+    url: rtsp://user:matkhau@192.168.1.50:554/stream1
+    transport: tcp            # tcp (khuyên dùng) | udp (khi TCP chập chờn)
+    stale_after_s: 10         # treo quá X giây thì tự kết nối lại
+    enabled: true
+    detect_fps: 4
+    mirror: false
+    crop_to_zones: false
+    # Khi mất camera: hold (giữ nguyên) | vacant (coi như trống) | publish_custom
+    on_camera_lost: hold
+    on_camera_lost_publish: []
+    reconnect:
+      initial_s: 0.5
+      max_s: 30
+      factor: 2
+    zones:
+      - id: khu_bep
+        name: Khu bếp
+        # Toạ độ CHUẨN HOÁ 0..1 (x, y) — không phụ thuộc độ phân giải
+        polygon: [[0.12, 0.35], [0.72, 0.35], [0.78, 0.95], [0.08, 0.95]]
+        classes: [person]
+        min_confidence: null    # null = dùng min_confidence toàn cục
+        anchor: bottom_center   # bottom_center | center | any_overlap | overlap_ratio
+        overlap_ratio: 0.5      # chỉ dùng khi anchor = overlap_ratio
+        enter_confirm: {frames: 3, of: 5}   # bỏ phiếu 3/5 khung để nhận "có người"
+        exit_grace_s: 3         # phải vắng liên tục 3 giây mới coi là trống
+        color: "#22c55e"
+        enabled: true
+        publish_state: true     # phát retained vision/cam_bep/khu_bep/state
+        state_topic: ""         # để trống = dùng topic mặc định ở trên
+
+  # Ví dụ camera test bằng webcam laptop (macOS) — chỉ mở khi có người xem
+  - id: cam_test_laptop
+    name: Camera test (webcam laptop)
+    source: webcam
+    device: auto              # auto = chọn camera có sẵn trong máy (không chọn iPhone)
+    resolution: [1280, 720]
+    fps: 15
+    mirror: true
+    test: true
+    auto_added: true
+    lazy_open: true           # tắt đèn webcam khi không ai xem
+    detect_fps: 4
+    zones:
+      - id: khuvuc_test
+        name: Vùng test
+        polygon: [[0.08, 0.12], [0.92, 0.12], [0.92, 0.95], [0.08, 0.95]]
+        classes: [person]
+
+# -----------------------------------------------------------------------------
+# Kịch bản (scenario) — logic thuần, test được với đồng hồ giả
+# -----------------------------------------------------------------------------
+scenarios:
+  - id: den_bep
+    name: Đèn bếp tự động
+    description: Có người thì bật đèn, vắng 30 giây thì mờ, vắng 2 phút thì tắt
+    enabled: true
+    zone: cam_bep/khu_bep
+    cooldown_s: 2             # chống gửi trùng trong 2 giây
+
+    # Có người vào vùng → bật đèn ngay
+    on_enter:
+      - after_s: 0
+        publish:
+          topic: zigbee2mqtt/den_bep/set
+          payload: {state: "ON", brightness: 254, transition: 1}
+          qos: 1
+          retain: false
+
+    # Vùng trống → mờ sau 30 giây, tắt sau 2 phút
+    on_vacant:
+      - after_s: 30
+        publish: {topic: zigbee2mqtt/den_bep/set, payload: {state: "ON", brightness: 80, transition: 3}}
+      - after_s: 120
+        publish: {topic: zigbee2mqtt/den_bep/set, payload: {state: "OFF", transition: 2}}
+
+    # Chỉ hoạt động trong khung giờ (bỏ trống = cả ngày)
+    # active_schedule: {from: "18:00", to: "06:00", days: [1, 2, 3, 4, 5]}
+    # Khung giờ vắt qua nửa đêm vẫn hiểu đúng (18:00 → 06:00).
+
+    # Nếu người dùng chỉnh đèn bằng tay/app khác, tạm dừng tự động 10 phút
+    manual_override:
+      state_topic: zigbee2mqtt/den_bep
+      pause_minutes: 10
+
+    # Các trigger bổ sung (ngoài on_enter/on_vacant)
+    # type: count_ge | count_le | dwell | class_present
+    triggers:
+      - type: count_ge
+        count: 3
+        cooldown_s: 60
+        steps:
+          - after_s: 0
+            publish:
+              topic: vision/den_bep/set
+              payload: {state: "ON", brightness: 254}
+      - type: dwell
+        seconds: 300
+        steps:
+          - after_s: 0
+            publish:
+              topic: nha/thong_bao
+              payload: {noi_dung: "Có người ở khu bếp hơn 5 phút", so_nguoi: "{{count}}"}
+
+  # Ví dụ 2: bật đèn khi thấy mèo (dùng class_present)
+  - id: den_meo
+    name: Đèn cho mèo
+    enabled: false
+    zone: cam_bep/khu_bep
+    triggers:
+      - type: class_present
+        classes: [cat]
+        cooldown_s: 30
+        steps:
+          - after_s: 0
+            publish:
+              topic: test/den_meo/set
+              payload: {state: "ON", brightness: 120}
+
+# -----------------------------------------------------------------------------
+# Camera test / webcam (macOS)
+# -----------------------------------------------------------------------------
+testing:
+  auto_webcam: false          # true = tự thêm camera test khi khởi động
+  publish_webcam_as_rtsp: false
+  test_topic_prefix: test/    # kịch bản của camera test chỉ gửi vào nhánh test/
+  webcam_rtsp_url: rtsp://127.0.0.1:8554/laptop
+  mediamtx_bin: ""            # để trống = dùng lệnh mediamtx trong PATH
+  ffmpeg_bin: ""              # để trống = dùng lệnh ffmpeg trong PATH
+  webcam_device: auto         # auto | tên camera | chỉ số
+  webcam_resolution: [1280, 720]
+  webcam_fps: 15              # fps mong muốn; loopback RTSP tự dò lại fps thiết bị hỗ trợ
+  test_camera_id: cam_test_laptop
+  test_rtsp_camera_id: cam_test_rtsp
+
+# -----------------------------------------------------------------------------
+# Web UI
+# -----------------------------------------------------------------------------
+web:
+  host: 0.0.0.0               # 127.0.0.1 nếu chỉ dùng trong máy
+  port: 8080
+  mjpeg_fps: 10               # khung hình/giây cho luồng xem trực tiếp
+  jpeg_quality: 70
+  stream_width: 960           # giảm xuống 640 nếu mạng yếu (xem trên điện thoại)
+  ui_ws_hz: 8                 # số lần đẩy trạng thái/giây qua WebSocket
+  allow_snapshot_save: true   # nút "Chụp ảnh" có lưu vào thư mục snapshots/
+  snapshot_dir: snapshots
+
+  # Đăng nhập (tuỳ chọn). Bật khi mở UI ra ngoài mạng LAN.
+  auth:
+    enabled: false
+    username: admin
+    password: ""              # ví dụ: ${WEB_PASSWORD}
+    token: ""                 # ví dụ: ${WEB_TOKEN}  (?token=... cho <img> MJPEG)
+    session_secret: ""        # ví dụ: ${WEB_SESSION_SECRET}
+    session_hours: 12
+
+# -----------------------------------------------------------------------------
+# Nhật ký
+# -----------------------------------------------------------------------------
+logging:
+  level: INFO                 # DEBUG khi cần soi kỹ
+  file: logs/vision-automation.log
+  max_bytes: 5000000          # tự xoay vòng log, không phình ổ cứng
+  backup_count: 3
+  event_ring: 500             # số sự kiện giữ trong bộ nhớ cho tab Nhật ký

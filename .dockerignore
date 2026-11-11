@@ -1,0 +1,20 @@
+# Giữ build context nhỏ: không gửi venv/cache/model/dữ liệu chạy vào Docker
+.venv/
+.uvcache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.yolo/
+logs/
+snapshots/
+samples/
+data/
+.run/
+tests/
+*.pt
+*.onnx
+*.engine
+.git/
+.gitignore
+.DS_Store

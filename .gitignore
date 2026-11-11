@@ -1,0 +1,29 @@
+# Môi trường & cache
+.venv/
+.uvcache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Dữ liệu chạy (không commit)
+config.yaml
+config.yaml.bak
+config.yaml.tmp*
+logs/
+snapshots/
+.run/
+.yolo/
+samples/
+*.pt
+*.onnx
+*.engine
+
+# macOS
+.DS_Store
+
+# MediaMTX sinh chứng chỉ TLS khi chạy
+auto.crt
+auto.key
+mediamtx.yml
+mediamtx-*.yml

@@ -1,0 +1,27 @@
+# Thư viện chạy (runtime) — Python 3.11/3.12
+# Cài: python -m pip install -r requirements.txt
+# macOS Apple Silicon: dùng python 3.12 (xem README) để có wheel torch/opencv.
+
+# Nhận diện đối tượng (kéo theo torch + numpy)
+ultralytics>=8.3,<9
+
+# Camera / xử lý ảnh
+opencv-python>=4.9
+numpy>=1.26,<3
+
+# Web UI
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# MQTT
+paho-mqtt>=2.1,<3
+
+# Cấu hình
+pydantic>=2.7,<3
+PyYAML>=6.0
+
+# macOS: liệt kê tên webcam + xin quyền camera (không bắt buộc, app vẫn chạy nếu thiếu)
+pyobjc-framework-AVFoundation>=10.3; sys_platform == "darwin"
+
+# Windows: đọc đúng TÊN webcam qua DirectShow (tuỳ chọn, không có vẫn chạy)
+pygrabber>=0.2; sys_platform == "win32"

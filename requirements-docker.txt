@@ -1,0 +1,9 @@
+# Biến thể cho Docker/server không có màn hình: OpenCV headless (nhẹ hơn nhiều).
+ultralytics>=8.3,<9
+opencv-python-headless>=4.9
+numpy>=1.26,<3
+fastapi>=0.115
+uvicorn[standard]>=0.30
+paho-mqtt>=2.1,<3
+pydantic>=2.7,<3
+PyYAML>=6.0

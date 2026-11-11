@@ -1,0 +1,67 @@
+# =============================================================================
+# Vision Automation — chạy bằng Docker Compose
+#
+#   mkdir -p data
+#   cp config.example.yaml data/config.yaml      # lần đầu (hoặc để app tự tạo)
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Cấu hình, log, snapshot và model được giữ trong ./data (không mất khi rebuild).
+# =============================================================================
+services:
+  vision-automation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vision-automation:latest
+    container_name: vision-automation
+    restart: unless-stopped
+    # host network: cần cho camera IP trong LAN + mDNS/ONVIF (Linux)
+    network_mode: host
+    # Nếu KHÔNG dùng được network_mode: host, bỏ dòng trên và dùng ports dưới đây:
+    # ports:
+    #   - "8080:8080"
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      VISION_PORT: "8080"
+      # Bí mật nên đặt qua biến môi trường, config.yaml dùng ${TEN_BIEN}
+      # MQTT_PASSWORD: "matkhau-mqtt"
+      # WEB_PASSWORD: "matkhau-web"
+    volumes:
+      - ./data:/data
+    # Giới hạn tài nguyên để không "ăn" hết NAS (tuỳ chỉnh theo máy)
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3g
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/state/public"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Tuỳ chọn: MQTT broker nội bộ (nếu nhà chưa có broker nào)
+  # Bật bằng: docker compose --profile mqtt up -d
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: vision-mosquitto
+    restart: unless-stopped
+    profiles: ["mqtt"]
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./data/mosquitto:/mosquitto/config
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

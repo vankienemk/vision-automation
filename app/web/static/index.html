@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>Vision Automation — Camera thông minh</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="logo"></div>
+    <div>
+      Vision Automation<br>
+      <small id="uptime-label">đang khởi động…</small>
+    </div>
+  </div>
+
+  <div class="dots">
+    <div class="dot-item" title="Trạng thái camera">
+      <span class="dot" id="dot-camera"></span><span id="lbl-camera">Camera</span>
+    </div>
+    <div class="dot-item" title="Trạng thái MQTT">
+      <span class="dot" id="dot-mqtt"></span><span id="lbl-mqtt">MQTT</span>
+    </div>
+    <div class="dot-item" title="Model nhận diện">
+      <span class="dot" id="dot-detector"></span><span id="lbl-detector">Model</span>
+    </div>
+    <label class="switch" title="Chế độ chạy thử: không gửi lệnh thật">
+      <input type="checkbox" id="dry-run-toggle">
+      <span class="track"></span>
+      <span>Dry-run</span>
+    </label>
+    <button class="btn small ghost" id="btn-help" title="Trợ giúp">?</button>
+  </div>
+
+  <div class="dry-banner" id="dry-banner">
+    ĐANG Ở CHẾ ĐỘ CHẠY THỬ (DRY-RUN) — không lệnh nào được gửi tới thiết bị thật
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="live" class="active">📹 Trực tiếp</button>
+  <button data-tab="zones">⬛ Vùng phát hiện</button>
+  <button data-tab="scenarios">⚙️ Kịch bản</button>
+  <button data-tab="simulate">🧪 Mô phỏng</button>
+  <button data-tab="logs">📜 Nhật ký</button>
+  <button data-tab="mqtt">🔌 MQTT</button>
+  <button data-tab="settings">🛠️ Cài đặt</button>
+</nav>
+
+<main>
+
+  <!-- ============================== LIVE ============================== -->
+  <section class="panel active" id="panel-live">
+    <div class="card">
+      <h2>Hình ảnh trực tiếp <span class="hint" id="live-cam-hint"></span></h2>
+      <div class="row" style="margin-bottom:10px">
+        <label class="field" style="min-width:200px">
+          <span>Camera</span>
+          <select id="live-camera-select"></select>
+        </label>
+        <div class="spacer"></div>
+        <button class="btn small" id="btn-snapshot">📷 Chụp ảnh</button>
+        <button class="btn small ghost" id="btn-reconnect-cam">↻ Kết nối lại</button>
+      </div>
+
+      <div class="live-wrap" id="live-wrap">
+        <img id="live-img" alt="Luồng camera">
+        <div class="offline-msg" id="offline-msg"></div>
+      </div>
+
+      <div class="stat-strip" id="live-stats">
+        <div class="stat">FPS camera <b id="st-capture">–</b></div>
+        <div class="stat">FPS suy luận <b id="st-infer">–</b></div>
+        <div class="stat">Thời gian suy luận <b id="st-ms">–</b></div>
+        <div class="stat" id="st-latency-box" title="Tuổi của khung hình đang hiển thị">Trễ hình <b id="st-latency">–</b></div>
+        <div class="stat">Thiết bị <b id="st-device">–</b></div>
+        <div class="stat">Vùng đang có người <b id="st-occupied">–</b></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Trạng thái vùng <span class="hint">xanh = có người, xám = trống</span></h2>
+      <div id="live-zones" class="zone-list"></div>
+    </div>
+  </section>
+
+  <!-- ============================== ZONES ============================== -->
+  <section class="panel" id="panel-zones">
+    <div class="card">
+      <h2>Vẽ vùng phát hiện trực tiếp trên ảnh</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label class="field" style="min-width:190px">
+          <span>Camera</span>
+          <select id="zone-camera-select"></select>
+        </label>
+        <label class="field" style="min-width:190px">
+          <span>Vùng đang sửa</span>
+          <select id="zone-select"></select>
+        </label>
+        <div class="spacer"></div>
+        <button class="btn small" id="zone-mode-poly">✏️ Vẽ đa giác</button>
+        <button class="btn small" id="zone-mode-rect">▭ Vẽ hình chữ nhật</button>
+      </div>
+
+      <div class="toolbar">
+        <button class="btn small" id="zone-undo">↶ Hoàn tác</button>
+        <button class="btn small" id="zone-redo">↷ Làm lại</button>
+        <button class="btn small" id="zone-finish" disabled>✔ Hoàn tất vùng</button>
+        <button class="btn small" id="zone-new">＋ Vùng mới</button>
+        <button class="btn small danger" id="zone-delete">🗑 Xoá vùng</button>
+        <div class="spacer"></div>
+        <button class="btn small primary" id="zone-save">💾 Lưu vùng</button>
+      </div>
+
+      <div class="draft-bar" id="zone-draft-bar">
+        <span>✏️ Đang vẽ vùng mới — <b id="zone-draft-count">0</b> điểm</span>
+        <span class="small">bấm đúp trên ảnh (hoặc “✔ Hoàn tất vùng”) để đóng vùng · nhấn <b>Esc</b> để huỷ</span>
+      </div>
+
+      <div class="live-wrap editing" id="zone-wrap">
+        <img id="zone-img" alt="Ảnh để vẽ vùng">
+        <canvas id="zone-canvas"></canvas>
+        <div class="zone-tip" id="zone-tip"></div>
+      </div>
+
+      <p class="vertex-hint" id="zone-hint">
+        <b>Công cụ: Đa giác</b> — bấm từng điểm trên ảnh, bấm đúp (hoặc “✔ Hoàn tất vùng”) để đóng vùng.
+        Khi sửa vùng, con trỏ chuột đổi theo thao tác:
+        <b>✋ ở điểm</b> = kéo chỉnh điểm đó · <b>+ ở cạnh</b> = kéo để thêm điểm ·
+        <b>✥ ở giữa vùng</b> = kéo di chuyển cả vùng. Điểm của vùng khác cũng kéo được (bấm vào là chuyển sang vùng đó).
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>Thuộc tính vùng</h2>
+      <div class="grid3">
+        <label class="field"><span>Tên vùng</span><input type="text" id="zone-name" placeholder="Khu bếp"></label>
+        <label class="field"><span>Mã vùng (id) <a href="#" id="zone-id-edit" class="id-lock" title="Bấm để đổi mã vùng">🔒</a></span>
+          <input type="text" id="zone-id" placeholder="khu_bep" readonly>
+        </label>
+        <label class="field"><span>Màu</span><input type="color" id="zone-color" value="#22c55e"></label>
+        <label class="field"><span>Kiểu vùng (đổi được khi đang sửa)</span>
+          <select id="zone-shape">
+            <option value="polygon">Đa giác tự do</option>
+            <option value="rect">Hình chữ nhật (4 góc vuông)</option>
+            <option value="full">Toàn khung hình</option>
+          </select>
+        </label>
+        <label class="field"><span>Cách xác định “trong vùng”</span>
+          <select id="zone-anchor">
+            <option value="bottom_center">Chân người (khuyên dùng)</option>
+            <option value="center">Tâm khung</option>
+            <option value="any_overlap">Chạm vùng là tính</option>
+            <option value="overlap_ratio">Tỉ lệ chồng lấn</option>
+          </select>
+        </label>
+        <label class="field"><span>Ngưỡng tin cậy riêng <b id="zone-conf-val">45%</b></span>
+          <input type="range" id="zone-conf" min="5" max="95" step="5" value="45">
+        </label>
+        <label class="field"><span>Bật vùng này</span>
+          <label class="switch"><input type="checkbox" id="zone-enabled" checked><span class="track"></span><span id="zone-enabled-text">Đang bật</span></label>
+        </label>
+      </div>
+      <p class="small muted">
+        Mã vùng dùng để kịch bản trỏ tới vùng này nên được <b>khoá</b> — đổi tên vùng không làm hỏng kịch bản.
+        Chỉ bấm 🔒 khi thật sự muốn đổi mã (app sẽ tự cập nhật kịch bản theo mã mới).
+      </p>
+
+      <h3>Lớp đối tượng tính trong vùng</h3>
+      <div class="row" style="margin-bottom:6px">
+        <input type="text" id="class-search" placeholder="Tìm lớp (ví dụ: person, cat…)" style="max-width:280px">
+        <button class="btn small ghost" id="class-reload">↻ Tải lại danh sách lớp</button>
+        <div class="spacer"></div>
+        <span class="badge blue" id="detector-badge">model: –</span>
+      </div>
+      <div class="classList" id="class-list"></div>
+      <p class="small muted">Mặc định chỉ tính <b>person</b>. Tick thêm lớp nếu muốn (ví dụ <i>cat</i> để bật đèn khi mèo vào).</p>
+    </div>
+
+    <div class="card">
+      <h2>Xem trước nhận diện</h2>
+      <p class="small muted">Ảnh dưới đây là khung hình mới nhất có vẽ khung nhận diện và vùng — dùng để canh vùng cho khớp.</p>
+      <div class="live-wrap" style="max-height:52vh">
+        <img id="zone-preview-img" alt="Xem trước nhận diện">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn small" id="btn-refresh-preview">↻ Làm mới xem trước</button>
+        <span class="small muted" id="preview-detect-info"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ SCENARIOS =========================== -->
+  <section class="panel" id="panel-scenarios">
+    <div class="card">
+      <h2>Kịch bản <span class="hint">chọn vùng → chọn điều kiện → thêm bước hành động</span></h2>
+      <div class="row">
+        <label class="field" style="min-width:240px">
+          <span>Kịch bản</span>
+          <select id="scenario-select"></select>
+        </label>
+        <button class="btn small" id="scenario-new">＋ Tạo kịch bản</button>
+        <button class="btn small danger" id="scenario-delete">🗑 Xoá</button>
+        <div class="spacer"></div>
+        <label class="switch"><input type="checkbox" id="scenario-enabled"><span class="track"></span><span>Kích hoạt</span></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Thông tin & vùng áp dụng</h2>
+      <div class="grid2">
+        <label class="field"><span>Tên kịch bản</span><input type="text" id="sc-name"></label>
+        <label class="field"><span>Mã kịch bản</span><input type="text" id="sc-id"></label>
+        <label class="field"><span>Vùng áp dụng</span><select id="sc-zone"></select></label>
+        <label class="field"><span>Thời gian chờ tối thiểu giữa 2 lần (giây)</span>
+          <input type="number" id="sc-cooldown" min="0" step="0.5" value="2"></label>
+      </div>
+      <label class="field" style="margin-top:8px"><span>Mô tả (không bắt buộc)</span>
+        <input type="text" id="sc-desc" placeholder="Ví dụ: bật đèn bếp khi có người"></label>
+      <div class="row" style="margin-top:8px">
+        <label class="field" style="min-width:160px"><span>Khung giờ hoạt động</span>
+          <select id="sc-schedule">
+            <option value="">Cả ngày</option>
+            <option value="custom">Tự đặt giờ…</option>
+          </select>
+        </label>
+        <label class="field" style="min-width:110px"><span>Từ</span><input type="text" id="sc-sched-from" placeholder="08:00"></label>
+        <label class="field" style="min-width:110px"><span>Đến</span><input type="text" id="sc-sched-to" placeholder="17:00"></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Điều kiện kích hoạt</h2>
+      <div class="row" style="margin-bottom:8px">
+        <div class="chips" id="trigger-chips"></div>
+      </div>
+      <div id="trigger-params" class="grid3"></div>
+      <p class="small muted" id="trigger-help"></p>
+    </div>
+
+    <div class="card">
+      <h2>Các bước hành động <span class="hint">mỗi bước: chờ bao lâu → gửi lệnh gì</span></h2>
+      <div class="chips" id="step-trigger-tabs" style="margin-bottom:10px"></div>
+      <div class="timeline" id="sc-timeline"></div>
+      <div id="sc-steps"></div>
+      <div class="row">
+        <button class="btn small" id="sc-add-step">＋ Thêm bước</button>
+        <div class="spacer"></div>
+        <button class="btn small primary" id="sc-save">💾 Lưu kịch bản</button>
+      </div>
+
+      <hr class="sep">
+      <h3>Mẫu nhanh</h3>
+      <div class="row">
+        <button class="btn small ghost" data-preset="zigbee2mqtt">Zigbee2MQTT</button>
+        <button class="btn small ghost" data-preset="ha">Home Assistant light</button>
+        <button class="btn small ghost" data-preset="tasmota">Tasmota / ESPHome</button>
+        <button class="btn small ghost" data-preset="raw">Raw JSON</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Mô phỏng payload <span class="hint">biến dùng được: {{count}} {{zone}} {{camera}} {{timestamp}} {{class_counts}}</span></h2>
+      <pre class="payload-preview" id="sc-payload-preview">—</pre>
+      <p class="small muted">Nhấn “Gửi thử” ở từng bước sau khi đã lưu kịch bản để kiểm tra broker thật.</p>
+    </div>
+
+    <div class="card">
+      <h2>Nâng cao — YAML</h2>
+      <p class="small muted">Sửa trực tiếp toàn bộ <code>config.yaml</code>. Bấm “Kiểm tra” để validate trước khi lưu.</p>
+      <textarea id="yaml-editor" spellcheck="false" style="min-height:260px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn small" id="yaml-validate">🔍 Kiểm tra</button>
+        <button class="btn small primary" id="yaml-save">💾 Lưu YAML</button>
+        <button class="btn small ghost" id="yaml-reload">↻ Tải lại</button>
+        <span class="small" id="yaml-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ SIMULATE =========================== -->
+  <section class="panel" id="panel-simulate">
+    <div class="card">
+      <h2>Mô phỏng <span class="hint">giả lập có người / trống mà không cần đứng trước camera</span></h2>
+      <div class="warnbox" style="margin-bottom:12px">
+        Mô phỏng chỉ thay đổi trạng thái vùng trong bộ nhớ. Nếu Dry-run đang BẬT (khuyến nghị khi thử),
+        không lệnh nào được gửi tới thiết bị thật.
+      </div>
+      <div class="row" style="margin-bottom:10px">
+        <label class="field" style="min-width:120px"><span>Số người giả lập</span>
+          <input type="number" id="sim-count" value="1" min="1" max="20"></label>
+        <div class="spacer"></div>
+        <button class="btn small" id="sim-stop-all">⏹ Tắt toàn bộ mô phỏng</button>
+      </div>
+      <div id="sim-zones" class="zone-list"></div>
+    </div>
+
+    <div class="card">
+      <h2>Tốc độ thời gian</h2>
+      <p class="small muted">Tăng tốc đồng hồ kịch bản để thử “mờ sau 30 giây” trong vài giây. Camera và nhận diện vẫn chạy thời gian thực.</p>
+      <div class="chips" id="sim-speed">
+        <span class="chip active" data-scale="1">x1 (bình thường)</span>
+        <span class="chip" data-scale="5">x5</span>
+        <span class="chip" data-scale="10">x10</span>
+        <span class="chip" data-scale="30">x30</span>
+      </div>
+      <p class="small muted" id="sim-speed-label" style="margin-top:8px">Đang chạy: x1</p>
+    </div>
+
+    <div class="card">
+      <h2>Trạng thái kịch bản</h2>
+      <div class="scenario-timeline" id="sc-status-list"></div>
+    </div>
+  </section>
+
+  <!-- ============================== LOGS ============================= -->
+  <section class="panel" id="panel-logs">
+    <div class="card">
+      <h2>Nhật ký trực tiếp</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label class="field" style="min-width:150px"><span>Loại</span>
+          <select id="log-kind">
+            <option value="">Tất cả</option>
+            <option value="command">Lệnh MQTT</option>
+            <option value="zone_enter">Có người vào vùng</option>
+            <option value="zone_exit">Rời vùng</option>
+            <option value="camera">Camera</option>
+            <option value="mqtt">MQTT</option>
+            <option value="config">Cấu hình</option>
+            <option value="error">Lỗi</option>
+            <option value="info">Thông tin</option>
+          </select>
+        </label>
+        <label class="field" style="min-width:130px"><span>Mức</span>
+          <select id="log-level">
+            <option value="">Tất cả</option>
+            <option value="info">info</option>
+            <option value="warning">warning</option>
+            <option value="error">error</option>
+          </select>
+        </label>
+        <div class="spacer"></div>
+        <button class="btn small ghost" id="log-clear">Xoá màn hình</button>
+      </div>
+      <div class="log-stream" id="log-stream"></div>
+    </div>
+
+    <div class="card">
+      <h2>Lịch sử gần đây <span class="hint">vào/ra vùng và lệnh đã gửi</span></h2>
+      <div class="scroll-y">
+        <table class="tbl" id="events-table">
+          <thead>
+            <tr><th>Giờ</th><th>Loại</th><th>Nội dung</th><th>Kết quả</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Tiến trình kịch bản <span class="hint">đếm ngược tới bước tiếp theo</span></h2>
+      <div class="scenario-timeline" id="log-sc-status"></div>
+    </div>
+  </section>
+
+  <!-- ============================== MQTT ============================= -->
+  <section class="panel" id="panel-mqtt">
+    <div class="card">
+      <h2>Kết nối MQTT</h2>
+      <div class="row" style="margin-bottom:8px">
+        <span class="badge" id="mqtt-state-badge">…</span>
+        <span class="small muted" id="mqtt-broker"></span>
+        <div class="spacer"></div>
+        <button class="btn small" id="mqtt-test">🔌 Kiểm tra kết nối</button>
+      </div>
+      <div class="stat-strip">
+        <div class="stat">Đã gửi <b id="mqtt-sent">0</b></div>
+        <div class="stat">Đã nhận <b id="mqtt-recv">0</b></div>
+        <div class="stat">Đang chờ <b id="mqtt-pending">0</b></div>
+        <div class="stat">Bị bỏ <b id="mqtt-dropped">0</b></div>
+      </div>
+      <div id="mqtt-error" class="errbox" style="display:none;margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>Gửi thử một lệnh</h2>
+      <div class="grid3">
+        <label class="field"><span>Topic</span><input type="text" id="pub-topic" placeholder="zigbee2mqtt/den_bep/set"></label>
+        <label class="field"><span>Payload (JSON hoặc text)</span><input type="text" id="pub-payload" value='{"state":"ON"}'></label>
+        <label class="field"><span>QoS</span>
+          <select id="pub-qos"><option>0</option><option selected>1</option><option>2</option></select></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="switch"><input type="checkbox" id="pub-retain"><span class="track"></span><span>Retain</span></label>
+        <div class="spacer"></div>
+        <button class="btn small primary" id="pub-send">📤 Gửi</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Theo dõi gửi / nhận</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label class="field" style="min-width:180px"><span>Lọc topic</span>
+          <input type="text" id="mon-topic" placeholder="vision/ hoặc zigbee2mqtt"></label>
+        <label class="field" style="min-width:120px"><span>Chiều</span>
+          <select id="mon-direction">
+            <option value="">Cả hai</option>
+            <option value="tx">Gửi đi</option>
+            <option value="rx">Nhận về</option>
+          </select>
+        </label>
+        <div class="spacer"></div>
+        <button class="btn small ghost" id="mon-refresh">↻ Làm mới</button>
+      </div>
+      <div class="scroll-y">
+        <table class="tbl" id="mon-table">
+          <thead><tr><th>Giờ</th><th>Chiều</th><th>Topic</th><th>Payload</th><th>OK</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================= SETTINGS ========================== -->
+  <section class="panel" id="panel-settings">
+    <div class="card">
+      <h2>Camera</h2>
+      <div id="settings-cameras"></div>
+      <hr class="sep">
+      <h3>Thêm camera RTSP</h3>
+      <div class="grid3">
+        <label class="field"><span>Mã camera</span><input type="text" id="new-cam-id" placeholder="cam_bep"></label>
+        <label class="field"><span>Tên hiển thị</span><input type="text" id="new-cam-name" placeholder="Camera bếp"></label>
+        <label class="field"><span>Transport</span>
+          <select id="new-cam-transport"><option value="tcp">TCP (khuyên dùng)</option><option value="udp">UDP</option></select></label>
+      </div>
+      <label class="field" style="margin-top:8px"><span>URL RTSP</span>
+        <input type="text" id="new-cam-url" placeholder="rtsp://user:matkhau@192.168.1.50:554/stream1"></label>
+      <div class="row" style="margin-top:8px">
+        <button class="btn small primary" id="add-camera">＋ Thêm camera</button>
+        <span class="small muted">Camera test (webcam) luôn được thêm riêng, không ảnh hưởng camera RTSP.</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Camera test bằng webcam (máy này)</h2>
+      <div class="row" style="margin-bottom:8px">
+        <label class="field" style="min-width:250px"><span>Chọn webcam</span>
+          <select id="webcam-select"></select></label>
+        <div class="spacer"></div>
+        <button class="btn small" id="webcam-refresh">↻ Quét lại</button>
+        <button class="btn small primary" id="testcam-add">＋ Bật camera test</button>
+      </div>
+      <div id="testcam-info" class="small muted"></div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" id="loopback-start">▶ Phát webcam qua RTSP (loopback)</button>
+        <button class="btn small ghost" id="loopback-stop">⏹ Tắt loopback</button>
+      </div>
+      <p class="small muted" id="loopback-info"></p>
+      <div class="warnbox" style="margin-top:8px" id="webcam-permission-box">
+        Quyền camera (macOS): System Settings → Privacy &amp; Security → Camera → bật cho Terminal/VS Code.
+        Quyền camera (Windows): Settings → Privacy &amp; security → Camera → bật “Camera access” và
+        “Let desktop apps access your camera”, sau đó khởi động lại app.
+        Nếu hình đen hoặc mất tín hiệu, bấm “Kết nối lại” ở tab Trực tiếp.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Nhận diện</h2>
+      <div class="grid3">
+        <label class="field"><span>Model</span><input type="text" id="det-model" placeholder="yolo11n.pt"></label>
+        <label class="field"><span>Thiết bị</span>
+          <select id="det-device">
+            <option value="auto">auto (MPS → CPU)</option>
+            <option value="mps">mps (Apple GPU)</option>
+            <option value="cpu">cpu</option>
+            <option value="cuda:0">cuda:0</option>
+          </select></label>
+        <label class="field"><span>imgsz</span><input type="number" id="det-imgsz" min="160" max="1280" step="32"></label>
+        <label class="field"><span>Tin cậy mặc định <b id="det-conf-val">45%</b></span>
+          <input type="range" id="det-conf" min="5" max="95" step="5"></label>
+        <label class="field"><span>detect_fps</span><input type="number" id="det-fps" min="1" max="30" step="1"></label>
+        <label class="field"><span>Tắt/bật lọc chuyển động</span>
+          <label class="switch"><input type="checkbox" id="det-motion"><span class="track"></span><span>Motion gating</span></label></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>MQTT broker</h2>
+      <div class="grid3">
+        <label class="field"><span>Host</span><input type="text" id="mq-host" placeholder="192.168.1.10"></label>
+        <label class="field"><span>Port</span><input type="number" id="mq-port" min="1" max="65535"></label>
+        <label class="field"><span>Client ID</span><input type="text" id="mq-client" placeholder="vision-automation"></label>
+        <label class="field"><span>User</span><input type="text" id="mq-user" autocomplete="off"></label>
+        <label class="field"><span>Password</span><input type="password" id="mq-pass" autocomplete="new-password" placeholder="****"></label>
+        <label class="field"><span>Topic availability</span><input type="text" id="mq-avail" placeholder="vision/status"></label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Web UI</h2>
+      <div class="grid3">
+        <label class="field"><span>Cổng</span><input type="number" id="web-port" min="1" max="65535"></label>
+        <label class="field"><span>Bật đăng nhập</span>
+          <label class="switch"><input type="checkbox" id="auth-enabled"><span class="track"></span><span>Yêu cầu đăng nhập</span></label></label>
+        <label class="field"><span>Tên đăng nhập</span><input type="text" id="auth-user"></label>
+        <label class="field"><span>Mật khẩu</span><input type="password" id="auth-pass" placeholder="****"></label>
+      </div>
+      <p class="small muted">Đổi cổng cần khởi động lại app; các thay đổi khác áp dụng ngay.</p>
+    </div>
+
+    <div class="row" style="margin-bottom:20px">
+      <button class="btn primary" id="settings-save">💾 Lưu cài đặt</button>
+      <button class="btn ghost" id="settings-reload">↻ Tải lại từ file</button>
+      <span class="small muted" id="settings-status"></span>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============================== WIZARD ============================== -->
+<div class="modal-backdrop" id="wizard">
+  <div class="modal">
+    <h2>Thiết lập lần đầu</h2>
+    <div class="wizard-steps">
+      <div class="ws now" id="w-step-1"></div>
+      <div class="ws" id="w-step-2"></div>
+      <div class="ws" id="w-step-3"></div>
+    </div>
+
+    <div class="wizard-page active" id="wpage-1">
+      <h3>1. Kết nối camera</h3>
+      <label class="field"><span>URL RTSP</span>
+        <input type="text" id="wiz-rtsp" placeholder="rtsp://user:matkhau@192.168.1.50:554/stream1"></label>
+      <label class="field" style="margin-top:8px"><span>Transport</span>
+        <select id="wiz-transport"><option value="tcp">TCP (khuyên dùng)</option><option value="udp">UDP — thử khi TCP lỗi</option></select></label>
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" id="wiz-test-cam">🔍 Kiểm tra kết nối</button>
+        <span class="small muted" id="wiz-cam-status"></span>
+      </div>
+      <div class="live-wrap" style="margin-top:10px;max-height:40vh">
+        <img id="wiz-preview" alt="Xem trước camera">
+      </div>
+      <p class="small muted">Không dùng camera IP? Bấm “Bỏ qua” để dùng webcam laptop ở tab Cài đặt.</p>
+    </div>
+
+    <div class="wizard-page" id="wpage-2">
+      <h3>2. Kết nối MQTT broker</h3>
+      <div class="grid2">
+        <label class="field"><span>Host</span><input type="text" id="wiz-mq-host" placeholder="192.168.1.10"></label>
+        <label class="field"><span>Port</span><input type="number" id="wiz-mq-port" value="1883"></label>
+        <label class="field"><span>User</span><input type="text" id="wiz-mq-user"></label>
+        <label class="field"><span>Password</span><input type="password" id="wiz-mq-pass"></label>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn small" id="wiz-test-mqtt">🔌 Kiểm tra MQTT</button>
+        <span class="small muted" id="wiz-mqtt-status"></span>
+      </div>
+      <p class="small muted">Chưa có broker? Bấm “Bỏ qua” — app vẫn chạy ở chế độ Dry-run và bạn có thể cấu hình sau.</p>
+    </div>
+
+    <div class="wizard-page" id="wpage-3">
+      <h3>3. Tạo kịch bản mẫu “Đèn bếp”</h3>
+      <div class="grid2">
+        <label class="field"><span>Tên kịch bản</span><input type="text" id="wiz-sc-name" value="Đèn bếp tự động"></label>
+        <label class="field"><span>Topic đèn</span><input type="text" id="wiz-sc-topic" value="zigbee2mqtt/den_bep/set"></label>
+      </div>
+      <p class="small muted">Kịch bản: có người trong vùng → bật đèn 100%; vắng 30 giây → mờ 30%; vắng 2 phút → tắt.</p>
+      <div class="okbox" style="margin-top:8px">Bạn có thể sửa mọi thứ sau trong tab “Kịch bản”.</div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <button class="btn ghost" id="wiz-skip">Bỏ qua</button>
+      <div class="spacer"></div>
+      <button class="btn" id="wiz-back">← Quay lại</button>
+      <button class="btn primary" id="wiz-next">Tiếp →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================== HELP =============================== -->
+<div class="modal-backdrop" id="help-modal">
+  <div class="modal">
+    <h2>Trợ giúp nhanh</h2>
+    <h3>Quy trình 3 bước</h3>
+    <ol class="small">
+      <li><b>Vùng phát hiện</b>: chọn camera, vẽ đa giác quanh khu vực cần theo dõi, lưu.</li>
+      <li><b>Kịch bản</b>: chọn vùng → điều kiện (có người / trống / đếm / ở lâu) → thêm bước gửi MQTT.</li>
+      <li><b>Kiểm tra</b>: bật Dry-run, bấm “Mô phỏng” để giả lập có người, xem Nhật ký rồi tắt Dry-run.</li>
+    </ol>
+    <h3>Lỗi thường gặp</h3>
+    <ul class="small">
+      <li><b>Không kết nối được RTSP</b>: sai mật khẩu/URL? thử đổi transport sang UDP.</li>
+      <li><b>Hình đen / không có hình</b>: chưa cấp quyền Camera — macOS: System Settings → Privacy &amp; Security → Camera;
+        Windows: Settings → Privacy &amp; security → Camera (bật cho desktop apps).</li>
+      <li><b>MQTT không kết nối</b>: kiểm tra broker đang chạy, đúng host/port, user/mật khẩu.</li>
+      <li><b>Đèn nhấp nháy</b>: tăng “K-of-N” lên 3/5 và tăng thời gian chờ rời vùng (exit grace).</li>
+    </ul>
+    <div class="row" style="margin-top:14px">
+      <div class="spacer"></div>
+      <button class="btn primary" id="help-close">Đóng</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
