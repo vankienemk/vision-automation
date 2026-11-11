@@ -162,9 +162,12 @@ class ScenarioRunner:
         self._occupied_since: float | None = None
         self._last_fire: dict[str, float] = {}
         self._paused_until: float | None = None
-        self._dwell_fired: set[int] = set()
+        self._dwell_fired: set[str] = set()
         self._class_active: set[str] = set()
-        self._count_flags: dict[int, bool] = {}
+        self._count_flags: dict[str, bool] = {}
+        self._last_sampled_at: float | None = None
+        self._last_unsampled_at: float | None = None
+        self._vacant_retry_at: float | None = None
         self._last_command: dict[str, Any] | None = None
         self._resume_needed = False
         self._zone_name = ""
@@ -192,6 +195,7 @@ class ScenarioRunner:
     def clear_timers(self) -> None:
         self._pending.clear()
         self._dwell_fired.clear()
+        self._vacant_retry_at = None
 
     def _context(self) -> dict[str, Any]:
         return {
@@ -237,10 +241,23 @@ class ScenarioRunner:
         )
 
     # -- presence --------------------------------------------------------- #
-    def apply_presence(self, state: ZoneState) -> list[CommandRequest]:
-        """Feed a zone snapshot; returns commands that are due immediately."""
+    def apply_presence(self, state: ZoneState, *, sampled: bool = True) -> list[CommandRequest]:
+        """Feed a zone snapshot; returns commands that are due immediately.
+
+        ``sampled=False`` = khung hình này KHÔNG có kết quả suy luận đáng tin (model
+        lỗi, chưa nạp xong). Khi đó số đếm thô không được dùng để bắn trigger
+        ``count_ge``/``count_le``/``class_present`` — nếu không, một lần model lỗi
+        sẽ tương đương "phòng không có ai" và có thể tắt đèn oan.
+        """
         now = self.clock.now()
         commands: list[CommandRequest] = []
+        if not sampled:
+            # Khung hình này không có kết quả suy luận đáng tin: GIỮ NGUYÊN mọi
+            # trạng thái đã biết (occupied/count) và không bắn trigger nào. Đây là
+            # van an toàn để lỗi model không biến thành "phòng trống" ⇒ tắt đèn.
+            self._last_unsampled_at = now
+            return commands
+        self._last_sampled_at = now
         self._count = state.count
         self._class_counts = dict(state.class_counts)
         if state.name:
@@ -321,6 +338,17 @@ class ScenarioRunner:
             if self._occupied is False:
                 commands.extend(self._start_trigger("vacant", moment, resync=True))
 
+        # Vắng vùng lần 2 trong lúc còn cooldown: timeline bị hoãn, phải chạy lại
+        # khi hết cooldown. Trước đây nó bị bỏ Im lặng nên đèn ở mãi trạng thái ON.
+        if self._vacant_retry_at is not None and moment >= self._vacant_retry_at:
+            self._vacant_retry_at = None
+            if self._occupied is False:
+                self.log.info(
+                    "Kịch bản '%s': hết cooldown, chạy lại timeline vắng vùng",
+                    self.scenario.name,
+                )
+                commands.extend(self._start_trigger("vacant", moment, resync=True))
+
         commands.extend(self._check_dwell(moment))
 
         due = sorted((step for step in self._pending if step.due <= moment), key=lambda s: (s.due, s.seq))
@@ -370,12 +398,22 @@ class ScenarioRunner:
             key = f"{spec.type}:{spec.count}:{spec.seconds}:{','.join(spec.classes)}"
             cooldown = self._effective_cooldown(spec)
             if not resync and not self._cooldown_ok(key, cooldown, now):
-                self.log.debug(
-                    "Kịch bản '%s': bỏ qua trigger %s (cooldown %.0fs)",
-                    self.scenario.name,
-                    spec.type,
-                    cooldown,
-                )
+                if spec.type == "vacant":
+                    # Không được BỎ timeline tắt đèn: hẹn chạy lại ngay khi hết cooldown.
+                    retry_at = self._last_fire.get(key, now) + cooldown
+                    self._vacant_retry_at = max(retry_at, now + 0.1)
+                    self.log.info(
+                        "Kịch bản '%s': vắng vùng lần nữa trong cooldown — sẽ chạy lại timeline sau %.0fs",
+                        self.scenario.name,
+                        self._vacant_retry_at - now,
+                    )
+                else:
+                    self.log.debug(
+                        "Kịch bản '%s': bỏ qua trigger %s (cooldown %.0fs)",
+                        self.scenario.name,
+                        spec.type,
+                        cooldown,
+                    )
                 continue
             if not self.schedule_active():
                 self.log.debug(
@@ -416,15 +454,25 @@ class ScenarioRunner:
                     )
         return commands
 
+    @staticmethod
+    def _spec_key(spec: TriggerSpec) -> str:
+        """Khoá ỔN ĐỊNH cho một trigger (không phụ thuộc thứ tự trong danh sách).
+
+        Trước đây dùng chỉ số ``enumerate()`` nên sửa/thêm trigger trong UI làm
+        lệch trạng thái cạnh (một lần bắn bị bỏ hoặc bắn thừa).
+        """
+        return f"{spec.type}:{spec.count}:{spec.seconds}:{','.join(spec.classes)}"
+
     def _check_level_triggers(self, now: float) -> list[CommandRequest]:
         """count_ge / count_le / class_present triggers."""
         commands: list[CommandRequest] = []
-        for index, spec in enumerate(self.scenario.all_triggers()):
+        for spec in self.scenario.all_triggers():
             if spec.type in ("count_ge", "count_le"):
                 threshold = spec.count or 0
                 matches = self._count >= threshold if spec.type == "count_ge" else self._count <= threshold
-                was = self._count_flags.get(index, False)
-                self._count_flags[index] = matches
+                key = self._spec_key(spec)
+                was = self._count_flags.get(key, False)
+                self._count_flags[key] = matches
                 if matches and not was:
                     commands.extend(self._start_trigger(spec.type, now, trigger=spec))
             elif spec.type == "class_present":
@@ -442,12 +490,13 @@ class ScenarioRunner:
         commands: list[CommandRequest] = []
         if not self._occupied or self._occupied_since is None:
             return commands
-        for index, spec in enumerate(self.scenario.all_triggers()):
-            if spec.type != "dwell" or index in self._dwell_fired:
+        for spec in self.scenario.all_triggers():
+            key = self._spec_key(spec)
+            if spec.type != "dwell" or key in self._dwell_fired:
                 continue
             threshold = spec.seconds or 0
             if now - self._occupied_since >= threshold:
-                self._dwell_fired.add(index)
+                self._dwell_fired.add(key)
                 self.log.info(
                     "Kịch bản '%s': có người liên tục %s -> trigger dwell",
                     self.scenario.name,
@@ -473,6 +522,37 @@ class ScenarioRunner:
         )
 
     # -- introspection ---------------------------------------------------- #
+    def explain(self, now: float | None = None) -> str:
+        """Một câu tiếng Việt giải thích TẠI SAO kịch bản đang (không) làm gì.
+
+        Đây là phần "giải thích quyết định" hiện trên UI: người dùng không phải
+        đoán vì sao đèn không bật, hay vì sao lệnh chưa gửi.
+        """
+        moment = self.clock.now() if now is None else now
+        if not self.scenario.enabled:
+            return "Kịch bản đang TẮT — không chạy gì cả."
+        remaining_pause = self.paused_remaining(moment)
+        if remaining_pause > 0:
+            return (
+                f"Tạm dừng {remaining_pause:.0f}s vì có người vừa chỉnh tay thiết bị "
+                f"(kịch bản sẽ tự bật lại sau đó)."
+            )
+        if not self.schedule_active():
+            return "Ngoài khung giờ hoạt động — không gửi lệnh nào (kể cả bước đang chờ)."
+        if self._occupied is None:
+            return "Chưa xác định được trạng thái vùng: đang chờ đủ số khung để bỏ phiếu."
+        if self._pending:
+            nxt = min(self._pending, key=lambda step: step.due)
+            wait = max(0.0, nxt.due - moment)
+            who = "Có người trong vùng" if self._occupied else "Vùng trống"
+            return f"{who} — bước “{nxt.label}” sẽ gửi sau {wait:.1f}s."
+        if self._vacant_retry_at is not None:
+            wait = max(0.0, self._vacant_retry_at - moment)
+            return f"Vùng trống — chờ hết thời gian chống dội (cooldown) {wait:.1f}s rồi chạy timeline."
+        if self._occupied:
+            return "Có người trong vùng — không có bước nào đang chờ."
+        return "Vùng trống — không có bước nào đang chờ."
+
     def status(self, now: float | None = None) -> dict[str, Any]:
         moment = self.clock.now() if now is None else now
         pending = sorted(self._pending, key=lambda s: s.due)
@@ -487,6 +567,11 @@ class ScenarioRunner:
             "timeline": "occupied" if self._occupied else ("vacant" if self._occupied is False else "unknown"),
             "schedule_active": self.schedule_active(),
             "paused_remaining_s": round(self.paused_remaining(moment), 1),
+            "reason": self.explain(moment),
+            "vacant_retry_in_s": (
+                round(max(0.0, self._vacant_retry_at - moment), 1)
+                if self._vacant_retry_at is not None else None
+            ),
             "pending": [
                 {
                     "trigger": step.trigger,
@@ -553,7 +638,7 @@ class ScenarioEngine:
         return list(self._by_zone)
 
     # -- events ----------------------------------------------------------- #
-    def on_zone_state(self, state: ZoneState) -> list[CommandRequest]:
+    def on_zone_state(self, state: ZoneState, *, sampled: bool = True) -> list[CommandRequest]:
         commands: list[CommandRequest] = []
         for scenario_id in self._by_zone.get(state.ref, []):
             runner = self._runners.get(scenario_id)
@@ -561,12 +646,12 @@ class ScenarioEngine:
                 continue
             if state.name:
                 runner.set_zone_name(state.name)
-            commands.extend(runner.apply_presence(state))
+            commands.extend(runner.apply_presence(state, sampled=sampled))
         return commands
 
     def tick(self) -> list[CommandRequest]:
         commands: list[CommandRequest] = []
-        for runner in self._runners.values():
+        for runner in list(self._runners.values()):
             commands.extend(runner.tick())
         return commands
 

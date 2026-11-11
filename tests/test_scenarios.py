@@ -440,3 +440,71 @@ def test_engine_reconfigure_adds_and_removes() -> None:
     assert engine.on_zone_state(zs(True))
     engine.reconfigure([])
     assert engine.status() == []
+
+
+# --------------------------------------------------------------------------- #
+# Hồi quy: vắng lần 2 trong thời gian cooldown không được làm mất timeline
+# (lỗi thật: đèn ở mãi trạng thái ON vì trigger "vacant" bị cooldown chặn và
+#  không có cơ chế hẹn lại).
+# --------------------------------------------------------------------------- #
+def test_second_vacancy_inside_cooldown_is_retried_not_dropped() -> None:
+    scenario = default_demo_scenario(REF, dim_after_s=30, off_after_s=120)
+    scenario.cooldown_s = 60.0
+    runner, clock = make_runner(scenario)
+
+    runner.apply_presence(zs(True, since=0.0))
+    assert len(runner.apply_presence(zs(False, since=1.0))) == 0  # timeline 1 bắt đầu
+
+    clock.advance(5.0)
+    runner.apply_presence(zs(True, since=5.0))       # người quay lại → huỷ timeline 1
+    clock.advance(5.0)
+    runner.apply_presence(zs(False, since=10.0))     # vắng lần 2, vẫn trong cooldown 60 s
+
+    # Timeline phải được HẸN LẠI (không được im lặng bỏ).
+    assert runner.status()["pending"] or runner._vacant_retry_at is not None  # noqa: SLF001
+
+    clock.advance(61.0)                              # qua mốc cooldown
+    runner.tick()
+    assert runner.status()["pending"], "timeline giảm sáng/tắt đèn không được hẹn lại"
+
+    clock.advance(30.0)
+    commands = runner.tick()
+    assert [c.step_label for c in commands], "bước giảm sáng không bao giờ chạy"
+
+
+# --------------------------------------------------------------------------- #
+# Hồi quy: khung hình KHÔNG lấy mẫu được (suy luận lỗi) không được bắn trigger
+# theo số đếm (nếu không: lỗi model ⇒ "count_le 0" ⇒ tắt đèn oan).
+# --------------------------------------------------------------------------- #
+def test_unsampled_frame_does_not_fire_count_triggers() -> None:
+    trigger = TriggerSpec(
+        type="count_le",
+        count=0,
+        steps=[StepSpec(after_s=0, publish=PublishAction(topic="nha/den/set", payload={"state": "OFF"}))],
+    )
+    scenario = ScenarioConfig(id="den", name="Đèn", zone=REF, triggers=[trigger])
+    runner, clock = make_runner(scenario)
+
+    runner.apply_presence(zs(True, since=0.0))
+    clock.advance(1.0)
+    commands = runner.apply_presence(zs(False, since=1.0), sampled=False)
+    assert commands == [], "khung hình không lấy mẫu được lại bắn lệnh theo số đếm"
+    assert runner.status()["occupied"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Trạng thái phải NÓI RÕ vì sao đang không làm gì (yêu cầu "giải thích quyết định")
+# --------------------------------------------------------------------------- #
+def test_status_explains_why_nothing_happens() -> None:
+    scenario = default_demo_scenario(REF)
+    scenario.active_schedule = ScheduleConfig.model_validate({"from": "08:00", "to": "09:00"})
+    clock = FakeClock(wall_at(12, 0))
+    runner = ScenarioRunner(scenario, clock, wall_clock=lambda: wall_at(12, 0))
+    runner.apply_presence(zs(True, since=0.0))
+    reason = runner.status()["reason"]
+    assert isinstance(reason, str) and reason
+    assert "khung giờ" in reason.lower()
+
+    plain, _ = make_runner(default_demo_scenario(REF))
+    unknown_reason = plain.status()["reason"]
+    assert "chưa xác định" in unknown_reason.lower()
