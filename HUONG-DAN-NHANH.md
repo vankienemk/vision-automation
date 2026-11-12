@@ -260,6 +260,7 @@ Trước khi chạy thật, kiểm tra 5 điều:
 | Ô **Trễ hình** hiện **vàng (≥ 1 giây)**, hình "đi sau" thực tế | Đường truyền đang đệm khung | **Cài đặt** → `web.stream_width` 960 → 640, hoặc dùng **sub-stream** của camera (640×480), hoặc đổi Transport sang `udp` |
 | Băng đỏ **"Luồng treo quá 10s"** lặp lại đều đặn | Camera/NVR tự ngắt luồng, hoặc mạng chập chờn | App **tự nối lại** (không cần làm gì). Nếu lặp mãi: kiểm tra dây/Wi-Fi của camera, hạ độ phân giải — xem `README.md` §16.1 |
 | Ổ đĩa đầy dần / muốn biết app dùng bao nhiêu RAM | Mở tab **Trực tiếp** → khung **Chẩn đoán** có dòng *RAM … · Ổ đĩa trống … · Nhật ký … · giữ 30 ngày*. Đổi số ngày giữ log ở **Cài đặt → Nhật ký & ổ đĩa** (mặc định 30) |
+| Ảnh trực tiếp **đen** nhưng FPS vẫn nhảy (sau khi tắt rồi mở lại app) | Nay **app tự sửa**: đợi ~5–10 giây sẽ thấy dòng *“Chưa nhận được hình — đang tự nối lại…”* rồi hình về. Muốn nhanh: bấm **↻ Kết nối lại** cạnh ảnh. Màn *“Ứng dụng đang dừng”* cũng tự gỡ khi bạn chạy lại app — không cần F5 |
 | **FPS suy luận 0.0** + vùng ghi **"Đang xác định…"** | Camera vừa thêm từ giao diện mà luồng suy luận chưa chạy | Khởi động lại app; nếu vẫn vậy, tắt rồi bật lại camera trong **Cài đặt** |
 
 Nút **?** ở góc trên phải giao diện luôn mở lại bảng trợ giúp này.

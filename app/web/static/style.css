@@ -221,6 +221,14 @@ a.id-lock:hover { opacity: 1; }
 }
 .offline-msg.show { display: block; }
 .offline-msg.slow { background: #78350fcc; color: #fef3c7; }
+/* "Chưa nhận được hình — đang tự nối lại": hiện khi luồng MJPEG chết mà máy chủ
+ * vẫn sống (ví dụ vừa khởi động lại app nên <img> không còn khung hình). */
+.stream-note {
+  position: absolute; inset: 10px auto auto 10px;
+  background: #0b1220dd; color: var(--text); padding: 6px 10px; border-radius: 8px;
+  font-size: 12px; border: 1px solid var(--line); display: none; z-index: 2;
+}
+.stream-note.show { display: block; }
 .stat.warn b { color: var(--amber); }
 
 .stat-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }

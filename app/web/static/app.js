@@ -106,6 +106,14 @@ const S = {
   stopped: false,          // người dùng đã bấm Tắt ứng dụng → ngừng nối lại
   assetVersion: null,      // phiên bản app.js/style.css lúc mở trang
   staleNotified: false,
+  // Theo dõi luồng MJPEG: trình duyệt chỉ xin luồng MỘT lần cho mỗi <img>, nên
+  // khi máy chủ khởi động lại thì ảnh chết mà không ai xin lại (xem checkLiveStream).
+  streamCam: null,         // camera của luồng đang gắn vào #live-img
+  streamFails: 0,          // số lần đã thử nối lại
+  streamDeadSince: 0,      // mốc thời gian phát hiện ảnh không còn khung hình
+  wsEverOpen: false,       // đã từng nối được WebSocket
+  wsDownAt: 0,             // lúc WebSocket rớt (để biết máy chủ vừa khởi động lại)
+  everWentDown: false,     // màn "Ứng dụng đang dừng" đã thấy máy chủ tắt hẳn
 };
 
 const ZE = {
@@ -180,7 +188,14 @@ function connectWs() {
   try { socket = new WebSocket(url); } catch (e) { scheduleWsRetry(); return; }
   S.ws = socket;
 
-  socket.onopen = () => { S.wsRetry = 0; };
+  socket.onopen = () => {
+    S.wsRetry = 0;
+    const reconnected = S.wsEverOpen;
+    S.wsEverOpen = true;
+    // Nối lại được sau khi đã rớt ⇒ máy chủ (hoặc mạng) vừa trở lại: luồng
+    // MJPEG cũ chắc chắn đã chết, phải xin luồng mới thì mới có hình.
+    if (reconnected) resumeAfterReconnect();
+  };
   socket.onmessage = (event) => {
     let payload;
     try { payload = JSON.parse(event.data); } catch (e) { return; }
@@ -189,6 +204,7 @@ function connectWs() {
   };
   socket.onclose = (event) => {
     if (event.code === 4401) { location.href = '/login'; return; }
+    if (!S.wsDownAt) S.wsDownAt = Date.now();
     scheduleWsRetry();
   };
   socket.onerror = () => { try { socket.close(); } catch (e) {} };
@@ -496,6 +512,111 @@ function renderCameraSelects() {
   }
 }
 
+/* --------------------------------------------------- luồng MJPEG (watchdog)
+ *
+ * Trình duyệt chỉ xin luồng `<img src="/stream/...mjpg">` ĐÚNG MỘT LẦN cho mỗi
+ * giá trị src. Khi máy chủ khởi động lại (hoặc mạng chớp), kết nối multipart
+ * cũ chết nhưng thuộc tính src vẫn giữ nguyên → trình duyệt KHÔNG tự xin lại,
+ * nên khung hình thành ĐEN trong khi số liệu (FPS camera, FPS suy luận) vẫn
+ * chạy bình thường vì WebSocket đã tự nối lại. Đây chính là lỗi "mở lại app
+ * thì mất hình".
+ *
+ * Cách chữa: (1) luôn thêm tham số chống đệm `?r=<thời điểm>` vào URL luồng,
+ * (2) canh me mỗi 1,5 giây — nếu ảnh không có khung hình thì tự gắn lại src
+ * (chờ 4s → 8s → 12s → tối đa 15s), (3) khi WebSocket vừa nối lại thì coi như
+ * máy chủ vừa khởi động lại và xin luồng mới ngay.
+ */
+const STREAM_RETRY_BASE_MS = 4000;
+const STREAM_RETRY_MAX_MS = 15000;
+
+function streamUrl(cameraId, bust) {
+  const base = '/stream/' + encodeURIComponent(cameraId) + '.mjpg' + tokenSuffix();
+  if (!bust) return base;
+  return base + (base.indexOf('?') >= 0 ? '&' : '?') + 'r=' + bust;
+}
+
+function showStreamNote(text) {
+  const note = $('#live-stream-note');
+  if (!note) return;
+  note.textContent = text;
+  note.classList.add('show');
+}
+
+function hideStreamNote() {
+  const note = $('#live-stream-note');
+  if (!note || !note.classList.contains('show')) return;
+  note.classList.remove('show');
+  note.textContent = '';
+}
+
+/** Gắn (hoặc gắn LẠI) luồng MJPEG cho #live-img. Luôn dùng URL mới. */
+function armLiveStream(cam, reason) {
+  const img = $('#live-img');
+  if (!img || !cam) return false;
+  S.streamCam = cam.id;
+  img.dataset.cam = cam.id;
+  img.src = streamUrl(cam.id, Date.now());
+  if (reason === 'retry' || reason === 'reconnect' || reason === 'manual') {
+    S.streamDeadSince = Date.now();
+  }
+  return true;
+}
+
+/** Ảnh đang có khung hình thật hay chưa (naturalWidth = 0 → chưa có gì để vẽ). */
+function liveStreamHasPixels() {
+  const img = $('#live-img');
+  if (!img) return false;
+  return !!(img.complete && img.naturalWidth > 0 && img.naturalHeight > 0);
+}
+
+/** Chạy mỗi 1,5 s: nếu luồng chết thì xin lại (kể cả khi máy chủ đã có hình). */
+function checkLiveStream() {
+  if (S.stopped) return;
+  const img = $('#live-img');
+  if (!img) return;
+  if (liveStreamHasPixels()) {
+    if (S.streamFails || S.streamDeadSince) {
+      S.streamFails = 0;
+      S.streamDeadSince = 0;
+      hideStreamNote();
+    }
+    return;
+  }
+  const cam = currentLiveCamera();
+  if (!cam) return;
+  const now = Date.now();
+  if (!img.getAttribute('src')) { armLiveStream(cam, 'missing'); return; }
+  if (!S.streamDeadSince) { S.streamDeadSince = now; return; }
+  const wait = Math.min(STREAM_RETRY_MAX_MS, STREAM_RETRY_BASE_MS * Math.max(1, S.streamFails));
+  if (now - S.streamDeadSince < wait) return;
+  S.streamFails += 1;
+  armLiveStream(cam, 'retry');
+  showStreamNote('Chưa nhận được hình — đang tự nối lại (lần ' + S.streamFails + ')…');
+}
+
+/**
+ * Máy chủ vừa nối lại (WebSocket mở được sau khi đã rớt) → phục hồi mọi thứ
+ * mà lần khởi động lại đã làm chết: luồng Live, ảnh tab Vùng, màn "đang dừng".
+ */
+function resumeAfterReconnect() {
+  const screen = $('#stopped-screen');
+  if (screen) {
+    screen.remove();
+    S.stopped = false;
+    S.everWentDown = false;
+  }
+  const wasDownLong = S.wsDownAt && (Date.now() - S.wsDownAt > 3000);
+  // WebSocket đã đóng hẳn (không phải đang mở/đang nối) thì mở lại.
+  if (!S.stopped && (!S.ws || S.ws.readyState > 1)) connectWs();
+
+  if (!liveStreamHasPixels()) {
+    const cam = currentLiveCamera();
+    if (cam) armLiveStream(cam, 'reconnect');
+  }
+  if (S.tab === 'zones' && !ZE.frozen) setZoneImageSource();
+  if (wasDownLong) toast('Đã nối lại máy chủ — đang tải lại hình…', '');
+}
+
 function renderLive() {
   const cam = currentLiveCamera();
   renderCameraSelects();
@@ -506,10 +627,8 @@ function renderLive() {
     return;
   }
   const img = $('#live-img');
-  const want = '/stream/' + encodeURIComponent(cam.id) + '.mjpg' + tokenSuffix();
-  if (img.dataset.cam !== cam.id) {
-    img.dataset.cam = cam.id;
-    img.src = want;
+  if (img.dataset.cam !== cam.id || !img.getAttribute('src')) {
+    armLiveStream(cam, 'pick');
   }
 
   const capture = cam.capture || {};
@@ -1035,7 +1154,9 @@ function setZoneImageSource() {
   if (ZE.frozen && ZE.frozenSrc) {
     img.src = ZE.frozenSrc;
   } else {
-    img.src = '/stream/' + encodeURIComponent(ZE.cameraId) + '.mjpg' + tokenSuffix();
+    // Thêm ?r=<thời điểm> để trình duyệt luôn xin luồng MỚI — nếu không, sau khi
+    // máy chủ khởi động lại, ảnh ở tab này sẽ đen vĩnh viễn (giữ kết nối đã chết).
+    img.src = streamUrl(ZE.cameraId, Date.now());
   }
   updateFreezeBadge();
 }
@@ -2979,6 +3100,9 @@ function wireLive() {
   $('#live-camera-select').addEventListener('change', (event) => {
     S.liveCamera = event.target.value;
     $('#live-img').dataset.cam = '';
+    S.streamFails = 0;
+    S.streamDeadSince = 0;
+    hideStreamNote();
     renderLive();
   });
   $('#btn-snapshot').addEventListener('click', () => {
@@ -2989,10 +3113,25 @@ function wireLive() {
   $('#btn-reconnect-cam').addEventListener('click', () => {
     const cam = currentLiveCamera();
     if (!cam) return;
-    $('#live-img').dataset.cam = '';
-    renderLive();
+    S.streamFails = 0;
+    S.streamDeadSince = 0;
+    armLiveStream(cam, 'manual');
     toast('Đang kết nối lại ' + cam.id, '');
   });
+
+  // Có khung hình trở lại (hoặc lỗi) thì cập nhật bộ đếm để watchdog thôi thử lại.
+  const img = $('#live-img');
+  if (img) {
+    img.addEventListener('load', () => {
+      S.streamFails = 0;
+      S.streamDeadSince = 0;
+      hideStreamNote();
+    });
+    img.addEventListener('error', () => {
+      if (!S.streamDeadSince) S.streamDeadSince = Date.now();
+    });
+  }
+  setInterval(checkLiveStream, 1500);
 }
 
 function wireZoneEditor() {
@@ -3469,6 +3608,25 @@ window.__VO__ = {
   get tab() { return S.tab; },
   renderAll,
   setState(next) { S.state = next; noteAssetVersion(next); renderAll(); },
+  // --- luồng hình (dùng cho test tự động + gỡ lỗi "mất hình") ---
+  get stream() {
+    const img = $('#live-img');
+    const note = $('#live-stream-note');
+    return {
+      src: img ? img.getAttribute('src') : null,
+      hasPixels: liveStreamHasPixels(),
+      fails: S.streamFails,
+      stopped: S.stopped,
+      noteShown: !!(note && note.classList.contains('show')),
+      note: note ? note.textContent : '',
+      stoppedScreen: !!$('#stopped-screen'),
+    };
+  },
+  armLiveStream(reason) { return armLiveStream(currentLiveCamera(), reason || 'manual'); },
+  checkLiveStream,
+  resumeAfterReconnect,
+  showStoppedScreen,
+  markServerWasDown() { S.everWentDown = true; },
 };
 
 document.addEventListener('DOMContentLoaded', boot);
@@ -3556,11 +3714,24 @@ function showStoppedScreen() {
       alive = res.ok;
     } catch (e) { alive = false; }
     const text = $('#stopped-text');
-    if (!alive && text) {
+    if (!alive) {
+      S.everWentDown = true;
+      if (text && !text.classList.contains('ok')) {
+        text.innerHTML = '✅ Ứng dụng <b>đã dừng</b> — đã lưu cấu hình, đã gửi MQTT offline.';
+        text.className = 'small ok';
+      }
+      return;   // vẫn tiếp tục canh: nếu người dùng chạy lại app thì tự phục hồi
+    }
+    if (S.everWentDown) {
+      // Máy chủ đã tắt hẳn rồi sống lại ⇒ KHÔNG bắt người dùng bấm F5:
+      // gỡ màn hình chờ, nối lại WebSocket và xin luồng hình mới.
       clearInterval(timer);
-      text.innerHTML = '✅ Ứng dụng <b>đã dừng</b> — đã lưu cấu hình, đã gửi MQTT offline.';
-      text.className = 'small ok';
-    } else if (attempts > 40 && text) {
+      S.wsDownAt = Date.now();
+      resumeAfterReconnect();
+      toast('Ứng dụng đã chạy lại — đang kết nối lại…', 'ok');
+      return;
+    }
+    if (attempts > 40 && text) {
       clearInterval(timer);
       text.innerHTML = 'Ứng dụng chưa dừng hẳn sau 40 giây. Kiểm tra log <code>logs/vision-automation.log</code> ' +
         'hoặc tắt tiến trình python trong Task Manager.';

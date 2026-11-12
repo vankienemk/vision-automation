@@ -739,6 +739,8 @@ mosquitto_pub -h 192.168.1.10 -t zigbee2mqtt/den_bep/set -m '{"state":"ON"}'
 | `Trễ hình` báo ≥ 1 giây, hình “đi sau” thực tế | Đường truyền đang đệm khung (GOP dài, mạng chậm, CPU đuối). Xem [§16.1](#161-hình-bị-trễ-hoặc-treo-liên-tục-rtsp). |
 | `FPS suy luận 0.0` + vùng ghi `Đang xác định…` | Camera mới thêm từ UI chưa có luồng suy luận (lỗi cũ đã sửa ở bản này). Kiểm tra log có `Luồng suy luận <id> bắt đầu`; nếu thiếu, tắt rồi bật lại camera trong tab **Cài đặt**, hoặc khởi động lại app. |
 | Ảnh đen / “chưa có tín hiệu” | macOS chưa cấp quyền Camera → System Settings → Privacy & Security → Camera → bật cho Terminal/VS Code → **khởi động lại app**. Hoặc webcam đang bị Zoom/FaceTime giữ. |
+| **Ảnh live ĐEN nhưng `FPS camera`/`FPS suy luận` vẫn chạy** (thường sau khi tắt rồi mở lại app, hoặc sau khi rớt mạng) | Đã sửa: trình duyệt chỉ xin luồng `/stream/...mjpg` **một lần** cho mỗi `src`, nên khi máy chủ khởi động lại thì ảnh cũ chết mà không ai xin lại. Nay app tự canh mỗi 1,5 giây: ảnh không có khung hình → tự xin luồng mới (thêm `?r=<thời điểm>`), hiện chú thích *“Chưa nhận được hình — đang tự nối lại (lần N)…”*, và khi WebSocket nối lại thì xin luồng mới ngay. Nếu vẫn đen: bấm **↻ Kết nối lại** cạnh ảnh, rồi **F5**. |
+| Bấm **⏻ Tắt ứng dụng** rồi chạy lại app, tab cũ vẫn treo ở màn “Ứng dụng đang dừng” | Đã sửa: màn đó tự gỡ khi app chạy lại (nó hỏi `/api/state/public` mỗi giây; thấy máy chủ trả lời là nối lại WebSocket + xin luồng hình mới) — không cần F5. |
 | `device busy` khi mở webcam | Chỉ **một** tiến trình được dùng webcam. Đóng app khác, hoặc tắt loopback rồi mở lại. |
 | Đèn nhấp nháy | Tăng `enter_confirm` (3/5 hoặc 4/5) và `exit_grace_s` lên 4–5 giây; kiểm tra vùng có bao gồm vùng nhiễu (TV, gương). |
 | Không thấy lệnh MQTT | Đang bật **Dry-run**? (header có băng vàng). Kiểm tra tab MQTT → “Kiểm tra kết nối”, đúng host/port/user/password, và topic có đúng không. |
@@ -841,7 +843,7 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
-Bộ test (**296 test**) phủ:
+Bộ test (**301 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
 - **`tests/test_zones.py`** — hình học đa giác, **5 chế độ xác định trong vùng**
@@ -893,7 +895,7 @@ vision_automation/
 │   └── web/
 │       ├── server.py       # FastAPI: REST, WebSocket, MJPEG, auth
 │       └── static/         # index.html, app.js, style.css (không build)
-├── tests/                  # 296 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
+├── tests/                  # 301 test (pytest + Playwright UI), gồm test_platform.py, test_netcheck.py
 ├── run.py                  # khởi chạy từ BẤT KỲ thư mục nào (Task Scheduler/NSSM)
 ├── Khoi-dong.bat           # Windows: bấm đúp để chạy (tự tạo .venv + cài lib)
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
@@ -946,6 +948,7 @@ OpenCV/MQTT**, nên test được với **đồng hồ giả** và chạy nhanh.
 | Hộp quyền camera | trước: luôn in “macOS chưa cho phép…” dù đã cấp quyền; nay **“✅ Đã cấp quyền camera cho ứng dụng này.”** (nền xanh), chỉ hiện hướng dẫn cấp quyền khi thật sự bị chặn |
 | Thẻ camera trong Cài đặt | hiện thêm dòng 💡 **gợi ý sửa** (`capture.hint`) và nút **🔌 Kiểm tra** với kết quả chi tiết ngay dưới tên camera |
 | Tab cũ giữ `app.js` cũ (bẫy “bấm không ăn” lần 2) | `GET /api/state` trả `asset_version` = mtime của `app.js`/`style.css`. Đo trên app thật cổng 8080: mở trang → **0** banner; đổi mtime (giả lập phát hành bản mới) → **2.5 s sau banner hiện** *“🔄 Máy chủ vừa có bản giao diện mới…”* + nút **Nạp lại ngay** |
+| Ảnh live ĐEN + số liệu vẫn chạy sau khi khởi động lại app | Tái hiện bằng WebKit (engine Safari) trên app thật: tab mở → tắt app (SIGTERM) → bật lại → **ảnh chết vĩnh viễn** (`naturalWidth 0`, chỉ **1** request `/stream/…` trong cả phiên) trong khi WebSocket nối lại và FPS vẫn cập nhật. Sau khi sửa: watchdog tự xin luồng mới — đo lại **`naturalWidth 810`**, request mới `?r=1794482329714` sau ~8 s (lần thử đầu rơi đúng lúc máy chủ còn tắt → `FAIL`, lần sau thành công). Bấm **⏻ Tắt ứng dụng** rồi bật lại: `#stopped-screen` tự gỡ, ảnh về (`nw 810`) **không cần F5** |
 
 ## 19. Những gì đã chạy thật trên máy Apple Silicon (M1)
 

@@ -926,3 +926,72 @@ def test_settings_log_card_limits_logs_to_30_days(browser, ui_base_url):
         assert cfg["logging"]["max_bytes"] >= 100000
     finally:
         page.context.close()
+
+
+# --------------------------------------------------------------- luồng hình
+# Lỗi thật đã gặp: bấm “Tắt ứng dụng” (hoặc khởi động lại app từ terminal) rồi mở
+# lại thì ảnh live ĐEN trong khi FPS/suy luận vẫn chạy. Nguyên nhân: trình duyệt
+# chỉ xin `/stream/....mjpg` MỘT lần cho mỗi giá trị src, nên kết nối chết không
+# bao giờ được xin lại. Ba test dưới đây khoá lại hành vi tự phục hồi.
+
+def test_dead_live_stream_is_rearmed_by_the_watchdog(open_zone_tab):
+    page, _rect = open_zone_tab(1)
+    page.click("#tabs button[data-tab='live']")
+    page.wait_for_function("() => document.querySelector('#live-img').naturalWidth > 0", timeout=15000)
+    before = page.evaluate("() => window.__VO__.stream")
+    assert before["hasPixels"] is True
+    assert before["src"].startswith("/stream/"), before
+
+    # Giả lập "kết nối MJPEG đã chết": ảnh không còn khung hình nào.
+    page.evaluate("() => { const img = document.querySelector('#live-img'); img.removeAttribute('src'); }")
+    assert page.evaluate("() => window.__VO__.stream")["hasPixels"] is False
+
+    page.evaluate("() => window.__VO__.checkLiveStream()")
+    page.wait_for_function("() => document.querySelector('#live-img').naturalWidth > 0", timeout=10000)
+    after = page.evaluate("() => window.__VO__.stream")
+    assert after["src"].startswith("/stream/"), after
+    assert "r=" in after["src"], f"thiếu tham số chống đệm: {after['src']}"
+    assert after["hasPixels"] is True
+
+
+def test_live_stream_gets_a_new_url_when_the_server_comes_back(open_zone_tab):
+    """Máy chủ khởi động lại ⇒ WebSocket nối lại ⇒ phải xin luồng MJPEG MỚI."""
+    page, _rect = open_zone_tab(1)
+    page.click("#tabs button[data-tab='live']")
+    page.wait_for_function("() => document.querySelector('#live-img').naturalWidth > 0", timeout=15000)
+    first = page.evaluate("() => window.__VO__.stream")["src"]
+
+    # Mô phỏng trạng thái sau khi app khởi động lại: ảnh chết, máy chủ đã sống lại.
+    page.evaluate("() => { const img = document.querySelector('#live-img'); img.removeAttribute('src'); }")
+    page.evaluate("() => window.__VO__.resumeAfterReconnect()")
+    page.wait_for_function("() => document.querySelector('#live-img').naturalWidth > 0", timeout=10000)
+    second = page.evaluate("() => window.__VO__.stream")["src"]
+    assert second.startswith("/stream/"), second
+    assert second != first, "luồng phải được xin lại bằng URL mới (chống đệm)"
+
+
+def test_stopped_screen_recovers_when_the_app_is_started_again(open_zone_tab):
+    """Màn “Ứng dụng đang dừng” tự gỡ khi app chạy lại — không bắt người dùng F5."""
+    page, _rect = open_zone_tab(1)
+    page.evaluate("() => window.__VO__.showStoppedScreen()")
+    assert page.is_visible("#stopped-screen")
+    assert page.evaluate("() => window.__VO__.stream")["stopped"] is True
+    # Máy chủ (giả) vẫn trả lời được ⇒ coi như app vừa được bật lại.
+    page.evaluate("() => window.__VO__.markServerWasDown()")
+    page.wait_for_selector("#stopped-screen", state="detached", timeout=10000)
+    state = page.evaluate("() => window.__VO__.stream")
+    assert state["stopped"] is False
+    assert state["src"] is None or state["src"].startswith("/stream/"), state
+
+
+def test_zone_tab_image_is_rearmed_after_a_server_restart(open_zone_tab):
+    """Tab “Vùng phát hiện” cũng phải tự xin lại ảnh (không thì đen như tab Live)."""
+    page, _rect = open_zone_tab(1)
+    page.evaluate("() => { ZE.frozen = false; ZE.frozenSrc = null; setZoneImageSource(); }")
+    page.wait_for_function("() => document.querySelector('#zone-img').naturalWidth > 0", timeout=15000)
+    page.evaluate("() => document.querySelector('#zone-img').removeAttribute('src')")
+    page.evaluate("() => window.__VO__.resumeAfterReconnect()")
+    page.wait_for_function("() => document.querySelector('#zone-img').naturalWidth > 0", timeout=10000)
+    src = page.evaluate("() => document.querySelector('#zone-img').getAttribute('src')")
+    assert src.startswith("/stream/"), src
+    assert "r=" in src, f"thiếu tham số chống đệm: {src}"
