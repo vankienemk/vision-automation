@@ -843,6 +843,11 @@ python -m pytest            # chạy toàn bộ
 python -m pytest -q         # tóm tắt
 ```
 
+> **Riêng 27 test giao diện** cần Chromium của Playwright (đã tải sẵn trong
+> `.run/pw-browsers/`, ~205 MB, **không nằm trong Git**). Nếu thư mục đó bị xoá,
+> các test UI sẽ **tự bỏ qua** (không fail) — muốn chạy lại thì:
+> `PLAYWRIGHT_BROWSERS_PATH="$PWD/.run/pw-browsers" python -m playwright install chromium`
+
 Bộ test (**301 test**) phủ:
 
 - **`tests/test_config.py`** — validate, che bí mật, ghi nguyên tử, hot reload.
@@ -901,12 +906,22 @@ vision_automation/
 ├── Dung-lai.bat            # Windows: dừng êm qua POST /api/system/shutdown
 ├── Kiem-tra-Windows.bat    # Windows: kiểm tra môi trường (python run.py --doctor)
 ├── HUONG-DAN-WINDOWS.md    # hướng dẫn Windows từng bước cho người mới
-├── config.example.yaml
+├── HUONG-DAN-NHANH.md      # hướng dẫn nhanh cho người không rành kỹ thuật
+├── config.example.yaml     # cấu hình mẫu có chú thích tiếng Việt
 ├── requirements.txt / requirements-dev.txt / requirements-docker.txt
 ├── Dockerfile / docker-compose.yml
 ├── vision-automation.service
+├── docs/                   # tài liệu kỹ thuật (không cần đọc để chạy)
+│   ├── AUDIT.md            # biên bản soát lỗi: 21 lỗi đã sửa + bằng chứng
+│   └── REPORT.md           # báo cáo tổng kết + rủi ro còn lại
 └── README.md
 ```
+
+> **Những gì KHÔNG nằm trong Git** (máy bạn tự sinh, không cần sao lưu): `.venv/`
+> (thư viện Python), `config.yaml` + `.bak` (cấu hình thật), `logs/` (nhật ký),
+> `snapshots/` (ảnh bạn tự chụp), `yolo11n.pt` (model), `.run/` (dụng cụ test
+> tải riêng trên máy này: `gh` + Chromium cho test giao diện), `.uvcache/`,
+> `.yolo/`. Xoá chúng không làm hỏng mã nguồn; chạy `Khoi-dong.bat` sẽ tự cài lại.
 
 Luồng dữ liệu:
 

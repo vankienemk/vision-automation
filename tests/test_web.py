@@ -92,6 +92,9 @@ def image_path(tmp_path):
 
 def build_runtime(tmp_path, image_path, *, auth_enabled: bool = False) -> Runtime:
     cfg = make_config(image_path, auth_enabled=auth_enabled)
+    # Ảnh chụp của test phải nằm trong tmp_path, KHÔNG được rơi vào thư mục
+    # snapshots/ thật của người dùng (mỗi lần chạy test lại thêm file rác).
+    cfg = cfg.model_copy(update={"web": cfg.web.model_copy(update={"snapshot_dir": str(tmp_path / "snapshots")})})
     path = tmp_path / "config.yaml"
     save_config(cfg, path)
     runtime = Runtime(ConfigManager(path, cfg), enable_detector=False)
